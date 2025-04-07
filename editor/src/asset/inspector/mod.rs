@@ -130,7 +130,10 @@ impl AssetInspector {
                 let context = InspectorContext::from_object(
                     reflect,
                     &mut ui.build_ctx(),
-                    Arc::new(make_property_editors_container(sender.clone())),
+                    Arc::new(make_property_editors_container(
+                        sender.clone(),
+                        resource_manager.clone(),
+                    )),
                     None,
                     MSG_SYNC_FLAG,
                     0,
@@ -221,7 +224,8 @@ fn default_import_options(
     resource_manager: &ResourceManager,
 ) -> Option<Box<dyn BaseImportOptions>> {
     let rm_state = resource_manager.state();
-    for loader in rm_state.loaders.iter() {
+    let loaders = rm_state.loaders.lock();
+    for loader in loaders.iter() {
         if loader.supports_extension(&extension.to_string_lossy()) {
             return loader.default_import_options();
         }
@@ -235,7 +239,8 @@ fn load_import_options_or_default(
 ) -> Option<Box<dyn BaseImportOptions>> {
     if let Some(extension) = resource_path.extension() {
         let rm_state = resource_manager.state();
-        for loader in rm_state.loaders.iter() {
+        let loaders = rm_state.loaders.lock();
+        for loader in loaders.iter() {
             if loader.supports_extension(&extension.to_string_lossy()) {
                 return if let Some(import_options) = block_on(loader.try_load_import_settings(
                     resource_path.to_owned(),

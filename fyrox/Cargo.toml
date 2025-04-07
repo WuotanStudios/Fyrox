@@ -1,6 +1,6 @@
 [package]
 name = "fyrox"
-version = "0.36.0"
+version = "0.36.2"
 authors = ["Dmitry Stepanov <d1maxa@yandex.ru>", "Fyrox Engine Contributors"]
 edition = "2021"
 license = "MIT"
@@ -12,15 +12,13 @@ homepage = "https://fyrox.rs"
 documentation = "https://docs.rs/fyrox"
 repository = "https://github.com/FyroxEngine/Fyrox"
 readme = "README.md"
-rust-version = "1.80"
+rust-version = "1.86"
 
 [features]
 default = ["fyrox-impl"]
 dylib = ["fyrox-dylib"]
-gltf = ["fyrox-impl/gltf", "fyrox-dylib/gltf"]
 mesh_analysis = ["fyrox-impl/mesh_analysis", "fyrox-dylib/mesh_analysis"]
-gltf_blend_shapes = ["fyrox-impl/gltf_blend_shapes", "fyrox-dylib/gltf_blend_shapes"]
 
 [dependencies]
-fyrox-impl = { version = "0.36.0", path = "../fyrox-impl", optional = true }
-fyrox-dylib = { version = "0.36.0", path = "../fyrox-dylib", optional = true }
+fyrox-impl = { version = "0.36.2", path = "../fyrox-impl", optional = true }
+fyrox-dylib = { version = "0.36.2", path = "../fyrox-dylib", optional = true }

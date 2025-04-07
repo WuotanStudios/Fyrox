@@ -18,16 +18,6 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::plugins::absm::{
-    command::fetch_machine,
-    selection::{AbsmSelection, SelectedEntity},
-};
-use crate::plugins::animation::{
-    self, command::fetch_animations_container, selection::AnimationSelection,
-};
-use crate::plugins::inspector::{
-    editors::handle::HandlePropertyEditorMessage, handlers::node::SceneNodePropertyChangedHandler,
-};
 use crate::{
     asset::item::AssetItem,
     audio::AudioBusSelection,
@@ -84,6 +74,17 @@ use crate::{
     highlight::HighlightRenderPass,
     interaction::navmesh::selection::NavmeshSelection,
     message::MessageSender,
+    plugins::{
+        absm::{
+            command::fetch_machine,
+            selection::{AbsmSelection, SelectedEntity},
+        },
+        animation::{self, command::fetch_animations_container, selection::AnimationSelection},
+        inspector::editors::handle::{
+            HandlePropertyEditorHierarchyMessage, HandlePropertyEditorNameMessage,
+        },
+        inspector::handlers::node::SceneNodePropertyChangedHandler,
+    },
     scene::{
         clipboard::Clipboard,
         commands::{
@@ -98,10 +99,11 @@ use crate::{
     world::graph::selection::GraphSelection,
     Message, Settings,
 };
-use fyrox::asset::untyped::ResourceKind;
+use fyrox::core::{define_as_any_trait, Uuid};
+
 use fyrox::graph::SceneGraphNode;
+use fyrox::gui::message::UiMessage;
 use std::{
-    any::Any,
     cell::RefCell,
     fmt::Debug,
     fs::File,
@@ -153,6 +155,7 @@ pub struct GameScene {
 lazy_static! {
     static ref GRID_SHADER: ShaderResource = {
         ShaderResource::from_str(
+            Uuid::new_v4(),
             include_str!("../../resources/shaders/grid.shader",),
             Default::default(),
         )
@@ -162,7 +165,7 @@ lazy_static! {
 
 fn make_grid_material() -> MaterialResource {
     let material = Material::from_shader(GRID_SHADER.clone());
-    MaterialResource::new_ok(Default::default(), material)
+    MaterialResource::new_embedded(material)
 }
 
 impl GameScene {
@@ -189,8 +192,7 @@ impl GameScene {
                 .with_frustum_culling(false)
                 .with_visibility(settings.graphics.draw_grid),
         )
-        .with_surfaces(vec![SurfaceBuilder::new(SurfaceResource::new_ok(
-            ResourceKind::Embedded,
+        .with_surfaces(vec![SurfaceBuilder::new(SurfaceResource::new_embedded(
             SurfaceData::make_quad(&Matrix4::new_scaling(2.0)),
         ))
         .with_material(make_grid_material())
@@ -271,7 +273,10 @@ impl GameScene {
         pure_scene.save("Scene", &mut visitor).unwrap();
 
         if let Err(e) = visitor.save_binary(path) {
-            Err(format!("Failed to save scene! Reason: {e}"))
+            Err(format!(
+                "Failed to save scene {}! Reason: {e}",
+                path.display()
+            ))
         } else {
             if settings.debugging.save_scene_in_text_form {
                 let text = visitor.save_text();
@@ -479,15 +484,6 @@ impl GameScene {
 }
 
 impl SceneController for GameScene {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-
-    #[must_use]
     fn on_key_up(
         &mut self,
         key: KeyCode,
@@ -501,7 +497,6 @@ impl SceneController for GameScene {
         false
     }
 
-    #[must_use]
     fn on_key_down(
         &mut self,
         key: KeyCode,
@@ -1000,32 +995,33 @@ impl SceneController for GameScene {
             }
             Message::SyncNodeHandleName { view, handle } => {
                 let scene = &engine.scenes[self.scene];
-                engine
-                    .user_interfaces
-                    .first_mut()
-                    .send_message(HandlePropertyEditorMessage::name(
-                        *view,
-                        MessageDirection::ToWidget,
+                engine.user_interfaces.first_mut().send_message(
+                    UiMessage::with_data(HandlePropertyEditorNameMessage(
                         scene
                             .graph
                             .try_get((*handle).into())
                             .map(|n| n.name_owned()),
-                    ));
+                    ))
+                    .with_destination(*view)
+                    .with_direction(MessageDirection::ToWidget),
+                );
                 false
             }
             Message::ProvideSceneHierarchy { view } => {
                 let scene = &engine.scenes[self.scene];
+
                 engine.user_interfaces.first_mut().send_message(
-                    HandlePropertyEditorMessage::hierarchy(
-                        *view,
-                        MessageDirection::ToWidget,
+                    UiMessage::with_data(HandlePropertyEditorHierarchyMessage(
                         HierarchyNode::from_scene_node(
                             self.scene_content_root,
                             Handle::NONE,
                             &scene.graph,
                         ),
-                    ),
+                    ))
+                    .with_destination(*view)
+                    .with_direction(MessageDirection::ToWidget),
                 );
+
                 false
             }
             _ => false,
@@ -1297,10 +1293,10 @@ impl SceneController for GameScene {
     }
 }
 
-pub trait BaseSelectionContainer: Debug + 'static {
+define_as_any_trait!(SelectionContainerAsAny => SelectionContainer);
+
+pub trait BaseSelectionContainer: SelectionContainerAsAny + Debug {
     fn clone_boxed(&self) -> Box<dyn SelectionContainer>;
-    fn as_any(&self) -> &dyn Any;
-    fn as_any_mut(&mut self) -> &mut dyn Any;
     fn eq_ref(&self, other: &dyn SelectionContainer) -> bool;
 }
 
@@ -1310,14 +1306,6 @@ where
 {
     fn clone_boxed(&self) -> Box<dyn SelectionContainer> {
         Box::new(self.clone())
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
     }
 
     fn eq_ref(&self, other: &dyn SelectionContainer) -> bool {
@@ -1413,11 +1401,11 @@ impl Selection {
     }
 
     pub fn is_single_selection(&self) -> bool {
-        self.0.as_ref().map_or(false, |s| s.is_single_selection())
+        self.0.as_ref().is_some_and(|s| s.is_single_selection())
     }
 
     pub fn is_multi_selection(&self) -> bool {
-        self.0.as_ref().map_or(false, |s| s.is_multi_selection())
+        self.0.as_ref().is_some_and(|s| s.is_multi_selection())
     }
 
     define_downcast!(GraphSelection, as_graph, as_graph_mut, is_graph);
@@ -1431,23 +1419,23 @@ impl Selection {
         is_audio_bus
     );
 
-    pub fn as_absm<N: 'static>(&self) -> Option<&AbsmSelection<N>> {
+    pub fn as_absm<N: Reflect>(&self) -> Option<&AbsmSelection<N>> {
         self.0.as_ref().and_then(|s| s.downcast_ref())
     }
-    pub fn as_absm_mut<N: 'static>(&mut self) -> Option<&mut AbsmSelection<N>> {
+    pub fn as_absm_mut<N: Reflect>(&mut self) -> Option<&mut AbsmSelection<N>> {
         self.0.as_mut().and_then(|s| s.downcast_mut())
     }
-    pub fn is_absm<N: 'static>(&mut self) -> bool {
+    pub fn is_absm<N: Reflect>(&mut self) -> bool {
         self.as_absm::<N>().is_some()
     }
 
-    pub fn as_animation<N: 'static>(&self) -> Option<&AnimationSelection<N>> {
+    pub fn as_animation<N: Reflect>(&self) -> Option<&AnimationSelection<N>> {
         self.0.as_ref().and_then(|s| s.downcast_ref())
     }
-    pub fn as_animation_mut<N: 'static>(&mut self) -> Option<&mut AnimationSelection<N>> {
+    pub fn as_animation_mut<N: Reflect>(&mut self) -> Option<&mut AnimationSelection<N>> {
         self.0.as_mut().and_then(|s| s.downcast_mut())
     }
-    pub fn is_animation<N: 'static>(&mut self) -> bool {
+    pub fn is_animation<N: Reflect>(&mut self) -> bool {
         self.as_animation::<N>().is_some()
     }
 

@@ -160,6 +160,7 @@ impl BoundValueCollectionExt for BoundValueCollection {
 /// The node could be a source of animations for animation blending state machines. To learn more about
 /// animations, see [`Animation`] docs.
 #[derive(Visit, Reflect, Clone, Debug, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct AnimationPlayer {
     widget: Widget,
     #[component(include)]

@@ -34,8 +34,10 @@ use crate::{
     dock::config::{DockingManagerLayoutDescriptor, FloatingWindowDescriptor, TileDescriptor},
     message::{MessageDirection, UiMessage},
     widget::{Widget, WidgetBuilder, WidgetMessage},
+    window::WindowMessage,
     BuildContext, Control, UiNode, UserInterface,
 };
+
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
 use fyrox_graph::{BaseSceneGraph, SceneGraph};
 use std::{
@@ -72,6 +74,7 @@ impl DockingManagerMessage {
 }
 
 #[derive(Default, Clone, Visit, Reflect, Debug, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct DockingManager {
     pub widget: Widget,
     pub floating_windows: RefCell<Vec<Handle<UiNode>>>,
@@ -141,6 +144,7 @@ impl DockingManager {
                         name: w.name.clone(),
                         position: w.actual_local_position(),
                         size: w.actual_local_size(),
+                        is_open: w.is_globally_visible(),
                     })
                 })
                 .collect::<Vec<_>>(),
@@ -166,15 +170,28 @@ impl DockingManager {
                 {
                     match tile.content {
                         TileContent::Window(window) => {
-                            if ui.try_get(window).is_some() {
+                            if ui.is_valid_handle(window) {
+                                // Detach the window from the tile, this is needed to prevent
+                                // deletion of the window when the tile is deleted.
+                                ui.unlink_node(window);
+
                                 windows.push(window);
+                            }
+                        }
+                        TileContent::MultiWindow {
+                            windows: ref tile_windows,
+                            ..
+                        } => {
+                            for w in tile_windows.clone() {
+                                ui.unlink_node(w);
+                                windows.push(w);
                             }
                         }
                         TileContent::VerticalTiles { tiles, .. }
                         | TileContent::HorizontalTiles { tiles, .. } => {
                             stack.extend_from_slice(&tiles);
                         }
-                        _ => (),
+                        TileContent::Empty => (),
                     }
                 }
             }
@@ -210,6 +227,20 @@ impl DockingManager {
                     ui.find_handle(ui.root(), &mut |n| n.name == floating_window_desc.name);
                 if floating_window.is_some() {
                     self.floating_windows.borrow_mut().push(floating_window);
+
+                    if floating_window_desc.is_open {
+                        ui.send_message(WindowMessage::open(
+                            floating_window,
+                            MessageDirection::ToWidget,
+                            false,
+                            false,
+                        ));
+                    } else {
+                        ui.send_message(WindowMessage::close(
+                            floating_window,
+                            MessageDirection::ToWidget,
+                        ));
+                    }
 
                     ui.send_message(WidgetMessage::desired_position(
                         floating_window,

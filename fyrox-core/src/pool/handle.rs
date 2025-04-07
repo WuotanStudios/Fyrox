@@ -18,11 +18,13 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+use crate::reflect::ReflectHandle;
 use crate::{
     combine_uuids, pool::INVALID_GENERATION, reflect::prelude::*, uuid_provider,
     visitor::prelude::*, TypeUuidProvider,
 };
 use serde::{Deserialize, Serialize};
+use std::any::{type_name, Any, TypeId};
 use std::{
     cmp::Ordering,
     fmt::{Debug, Display, Formatter},
@@ -35,19 +37,178 @@ use uuid::Uuid;
 /// Handle is some sort of non-owning reference to content in a pool. It stores
 /// index of object and additional information that allows to ensure that handle
 /// is still valid (points to the same object as when handle was created).
-#[derive(Reflect, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct Handle<T> {
     /// Index of object in pool.
-    #[reflect(read_only, description = "Index of an object in a pool.")]
     pub(super) index: u32,
     /// Generation number, if it is same as generation of pool record at
     /// index of handle then this is valid handle.
-    #[reflect(read_only, description = "Generation of an object in a pool.")]
     pub(super) generation: u32,
     /// Type holder.
-    #[reflect(hidden)]
     #[serde(skip)]
     pub(super) type_marker: PhantomData<T>,
+}
+
+impl<T: Reflect> ReflectHandle for Handle<T> {
+    fn reflect_inner_type_id(&self) -> TypeId {
+        TypeId::of::<T>()
+    }
+
+    fn reflect_inner_type_name(&self) -> &'static str {
+        type_name::<T>()
+    }
+
+    fn reflect_is_some(&self) -> bool {
+        self.is_some()
+    }
+
+    fn reflect_set_index(&mut self, index: u32) {
+        self.index = index;
+    }
+
+    fn reflect_index(&self) -> u32 {
+        self.index
+    }
+
+    fn reflect_set_generation(&mut self, generation: u32) {
+        self.generation = generation;
+    }
+
+    fn reflect_generation(&self) -> u32 {
+        self.generation
+    }
+
+    fn reflect_as_erased(&self) -> ErasedHandle {
+        ErasedHandle::new(self.index, self.generation)
+    }
+}
+
+static INDEX_METADATA: FieldMetadata = FieldMetadata {
+    name: "Index",
+    display_name: "Index",
+    description: "",
+    tag: "",
+    read_only: false,
+    immutable_collection: false,
+    min_value: None,
+    max_value: None,
+    step: None,
+    precision: None,
+    doc: "",
+};
+
+static GENERATION_METADATA: FieldMetadata = FieldMetadata {
+    name: "Generation",
+    display_name: "Generation",
+    description: "",
+    tag: "",
+    read_only: false,
+    immutable_collection: false,
+    min_value: None,
+    max_value: None,
+    step: None,
+    precision: None,
+    doc: "",
+};
+
+impl<T: Reflect> Reflect for Handle<T> {
+    fn source_path() -> &'static str {
+        file!()
+    }
+
+    fn derived_types() -> &'static [TypeId]
+    where
+        Self: Sized,
+    {
+        T::derived_types()
+    }
+
+    fn query_derived_types(&self) -> &'static [TypeId] {
+        Self::derived_types()
+    }
+
+    fn type_name(&self) -> &'static str {
+        type_name::<Self>()
+    }
+
+    fn doc(&self) -> &'static str {
+        ""
+    }
+
+    fn assembly_name(&self) -> &'static str {
+        env!("CARGO_PKG_NAME")
+    }
+
+    fn type_assembly_name() -> &'static str {
+        env!("CARGO_PKG_NAME")
+    }
+
+    fn fields_ref(&self, func: &mut dyn FnMut(&[FieldRef])) {
+        func(&[
+            {
+                FieldRef {
+                    metadata: &INDEX_METADATA,
+                    value: &self.index,
+                }
+            },
+            {
+                FieldRef {
+                    metadata: &GENERATION_METADATA,
+                    value: &self.generation,
+                }
+            },
+        ])
+    }
+
+    fn fields_mut(&mut self, func: &mut dyn FnMut(&mut [FieldMut])) {
+        func(&mut [
+            {
+                FieldMut {
+                    metadata: &INDEX_METADATA,
+                    value: &mut self.index,
+                }
+            },
+            {
+                FieldMut {
+                    metadata: &GENERATION_METADATA,
+                    value: &mut self.generation,
+                }
+            },
+        ])
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
+        self
+    }
+
+    fn as_any(&self, func: &mut dyn FnMut(&dyn Any)) {
+        func(self)
+    }
+
+    fn as_any_mut(&mut self, func: &mut dyn FnMut(&mut dyn Any)) {
+        func(self)
+    }
+
+    fn as_reflect(&self, func: &mut dyn FnMut(&dyn Reflect)) {
+        func(self)
+    }
+
+    fn as_reflect_mut(&mut self, func: &mut dyn FnMut(&mut dyn Reflect)) {
+        func(self)
+    }
+
+    fn set(&mut self, value: Box<dyn Reflect>) -> Result<Box<dyn Reflect>, Box<dyn Reflect>> {
+        let this = std::mem::replace(self, value.take()?);
+        Ok(Box::new(this))
+    }
+
+    fn as_handle(&self, func: &mut dyn FnMut(Option<&dyn ReflectHandle>)) {
+        func(Some(self))
+    }
+
+    fn as_handle_mut(&mut self, func: &mut dyn FnMut(Option<&mut dyn ReflectHandle>)) {
+        func(Some(self))
+    }
 }
 
 impl<T> Copy for Handle<T> {}

@@ -365,7 +365,52 @@ impl EditorSceneEntry {
         self.controller.on_mouse_wheel(amount, engine, settings)
     }
 
-    pub fn on_mouse_leave(&mut self, engine: &mut Engine, settings: &Settings) {
+    /// Called when the mouse enters the scene viewer.
+    pub fn on_mouse_enter(
+        &mut self,
+        screen_bounds: Rect<f32>,
+        engine: &mut Engine,
+        settings: &Settings,
+    ) {
+        if let Some(interaction_mode) = self
+            .current_interaction_mode
+            .and_then(|id| self.interaction_modes.get_mut(&id))
+        {
+            interaction_mode.on_mouse_enter(
+                &self.selection,
+                &mut *self.controller,
+                engine,
+                screen_bounds.size,
+                settings,
+            );
+        }
+    }
+
+    /// Called when the moue leaves the scene viewer.
+    pub fn on_mouse_leave(
+        &mut self,
+        screen_bounds: Rect<f32>,
+        engine: &mut Engine,
+        settings: &Settings,
+    ) {
+        let last_pos = self
+            .last_mouse_pos
+            .unwrap_or_else(|| engine.user_interfaces.first().cursor_position());
+        let rel_pos = last_pos - screen_bounds.position;
+
+        if let Some(interaction_mode) = self
+            .current_interaction_mode
+            .and_then(|id| self.interaction_modes.get_mut(&id))
+        {
+            interaction_mode.on_mouse_leave(
+                rel_pos,
+                &self.selection,
+                &mut *self.controller,
+                engine,
+                screen_bounds.size,
+                settings,
+            );
+        }
         self.controller.on_mouse_leave(engine, settings)
     }
 
@@ -479,17 +524,25 @@ impl SceneContainer {
     }
 
     pub fn take_scene(&mut self, id: Uuid) -> Option<EditorSceneEntry> {
+        // Remember the UUID of the current scene, because the index is about to become invalid
+        let current_id = self.current_scene_entry_ref().map(|s| s.id);
         let scene = self
             .entries
             .iter()
             .position(|e| e.id == id)
             .map(|i| self.entries.remove(i));
-        self.current_scene = if self.entries.is_empty() {
-            None
-        } else {
-            // TODO: Maybe set it to the previous one?
-            Some(0)
-        };
+        // Update the current scene index based on the UUID of the current scene.
+        if let Some(current_id) = current_id {
+            if !self.set_current_scene(current_id) {
+                // If the scene could not be set by UUID, then the current scene was taken.
+                self.current_scene = if self.entries.is_empty() {
+                    None
+                } else {
+                    // TODO: Maybe set it to the previous one?
+                    Some(0)
+                };
+            }
+        }
         scene
     }
 }

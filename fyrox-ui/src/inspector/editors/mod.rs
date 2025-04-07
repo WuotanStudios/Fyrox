@@ -21,7 +21,7 @@
 //! A collection of [PropertyEditorDefinition] objects for a wide variety of types,
 //! including standard Rust types and Fyrox core types.
 
-use crate::inspector::editors::path::PathPropertyEditorDefinition;
+use crate::inspector::editors::texture_slice::TextureSlicePropertyEditorDefinition;
 use crate::{
     absm::{EventAction, EventKind},
     bit::BitField,
@@ -33,11 +33,11 @@ use crate::{
         algebra::{UnitQuaternion, Vector2, Vector3, Vector4},
         color::Color,
         color_gradient::ColorGradient,
-        math::curve::Curve,
-        math::{Rect, SmoothAngle},
+        math::{curve::Curve, Rect, SmoothAngle},
         parking_lot::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard},
         pool::Handle,
-        reflect::{FieldInfo, FieldValue, Reflect},
+        reflect::prelude::*,
+        sstorage::ImmutableString,
         uuid::Uuid,
         visitor::prelude::*,
     },
@@ -61,11 +61,13 @@ use crate::{
             key::KeyBindingPropertyEditorDefinition,
             matrix2::MatrixPropertyEditorDefinition,
             numeric::NumericPropertyEditorDefinition,
+            path::PathPropertyEditorDefinition,
             quat::QuatPropertyEditorDefinition,
             range::RangePropertyEditorDefinition,
             rect::RectPropertyEditorDefinition,
             refcell::RefCellPropertyEditorDefinition,
             string::StringPropertyEditorDefinition,
+            style::StyledPropertyEditorDefinition,
             utf32::Utf32StringPropertyEditorDefinition,
             uuid::UuidPropertyEditorDefinition,
             vec::{
@@ -80,7 +82,7 @@ use crate::{
     menu::{Menu, MenuItem},
     message::{CursorIcon, UiMessage},
     messagebox::MessageBox,
-    nine_patch::NinePatch,
+    nine_patch::{NinePatch, StretchMode},
     numeric::NumericUpDown,
     path::PathEditor,
     popup::Popup,
@@ -90,6 +92,7 @@ use crate::{
     scroll_bar::ScrollBar,
     scroll_panel::ScrollPanel,
     stack_panel::StackPanel,
+    style::StyledProperty,
     tab_control::TabControl,
     text::Text,
     text_box::{Position, SelectionRange, TextBox, TextCommitMode},
@@ -105,12 +108,12 @@ use crate::{
 };
 use fxhash::FxHashMap;
 use fyrox_animation::machine::Parameter;
-use fyrox_core::sstorage::ImmutableString;
-use std::fmt::Formatter;
+use fyrox_texture::TextureResource;
 use std::{
     any::{Any, TypeId},
     cell::RefCell,
     fmt::Debug,
+    fmt::Formatter,
     ops::Range,
     path::PathBuf,
     str::FromStr,
@@ -137,6 +140,8 @@ pub mod range;
 pub mod rect;
 pub mod refcell;
 pub mod string;
+mod style;
+pub mod texture_slice;
 pub mod utf32;
 pub mod uuid;
 pub mod vec;
@@ -147,7 +152,7 @@ pub struct PropertyEditorBuildContext<'a, 'b, 'c, 'd> {
     /// General context for widget building to be used for creating the editor.
     pub build_context: &'a mut BuildContext<'c>,
     /// The FieldInfo of the property to edit, extracted from the object we are inspecting by reflection.
-    pub property_info: &'b FieldInfo<'b, 'd>,
+    pub property_info: &'b FieldRef<'b, 'd>,
     /// Untyped reference to the environment that the Inspector is being used in.
     /// This will often be
     /// [fyroxed_base::inspector::EditorEnvironment](https://docs.rs/fyroxed_base/latest/fyroxed_base/inspector/struct.EditorEnvironment.html)
@@ -192,7 +197,7 @@ pub struct PropertyEditorMessageContext<'a, 'b, 'c> {
     /// [UiMessage::flags] set to `sync_flag`.
     pub ui: &'b mut UserInterface,
     /// The FieldInfo of the property to edit, extracted from the object we are inspecting by reflection.
-    pub property_info: &'a FieldInfo<'a, 'c>,
+    pub property_info: &'a FieldRef<'a, 'c>,
     /// The list of the Inspectors property editors.
     /// This allows one property editor to make use of other property editors.
     pub definition_container: Arc<PropertyEditorDefinitionContainer>,
@@ -237,9 +242,6 @@ pub struct PropertyEditorTranslationContext<'b, 'c> {
     /// The name of the property being edited.
     /// This comes from [ContextEntry::property_name](crate::inspector::ContextEntry).
     pub name: &'b str,
-    /// The type of the object whose property is being edited.
-    /// This comes from [ContextEntry::property_owner_type_id](crate::inspector::ContextEntry).
-    pub owner_type_id: TypeId,
     /// The original message that may be translated, if it represents a change in the property.
     pub message: &'c UiMessage,
     /// The list of the Inspectors property editors.
@@ -470,6 +472,14 @@ impl PropertyEditorDefinitionContainer {
             Rect<f64>, Rect<f32>, Rect<i64>, Rect<u64>, Rect<i32>, Rect<u32>,
             Rect<i16>, Rect<u16>, Rect<i8>, Rect<u8>, Rect<usize>, Rect<isize>
         }
+        reg_property_editor! { container, InheritablePropertyEditorDefinition: new,
+            Option<Rect<f64>>, Option<Rect<f32>>, Option<Rect<i64>>, Option<Rect<u64>>, Option<Rect<i32>>, Option<Rect<u32>>,
+            Option<Rect<i16>>, Option<Rect<u16>>, Option<Rect<i8>>, Option<Rect<u8>>, Option<Rect<usize>>, Option<Rect<isize>>
+        }
+        reg_property_editor! { container, EnumPropertyEditorDefinition: new_optional,
+            Rect<f64>, Rect<f32>, Rect<i64>, Rect<u64>, Rect<i32>, Rect<u32>,
+            Rect<i16>, Rect<u16>, Rect<i8>, Rect<u8>, Rect<usize>, Rect<isize>
+        }
 
         // Option<NumericType> + InheritableVariable<Option<NumericType>>
         reg_property_editor! { container, EnumPropertyEditorDefinition: new_optional, f64, f32, i64, u64, i32, u32, i16, u16, i8, u8, usize, isize }
@@ -521,7 +531,7 @@ impl PropertyEditorDefinitionContainer {
         container.insert(InheritablePropertyEditorDefinition::<Curve>::new());
 
         // UI
-        container.register_inheritable_enum::<Brush, _>();
+        container.register_inheritable_styleable_enum::<Brush, _>();
         container.register_inheritable_enum::<Orientation, _>();
         container.register_inheritable_enum::<VerticalAlignment, _>();
         container.register_inheritable_enum::<HorizontalAlignment, _>();
@@ -552,6 +562,8 @@ impl PropertyEditorDefinitionContainer {
 
         container.register_inheritable_enum::<EventKind, _>();
 
+        container.register_inheritable_enum::<StretchMode, _>();
+
         container.insert(InspectablePropertyEditorDefinition::<EventAction>::new());
         container.register_inheritable_vec_collection::<EventAction>();
 
@@ -571,6 +583,25 @@ impl PropertyEditorDefinitionContainer {
         container.insert(InspectablePropertyEditorDefinition::<
             Arc<Mutex<RcUiNodeHandleInner>>,
         >::new());
+
+        container.insert(TextureSlicePropertyEditorDefinition);
+
+        // Styled.
+        container.insert(InheritablePropertyEditorDefinition::<StyledProperty<f32>>::new());
+        container.insert(StyledPropertyEditorDefinition::<f32>::new());
+
+        container.insert(InheritablePropertyEditorDefinition::<StyledProperty<Color>>::new());
+        container.insert(StyledPropertyEditorDefinition::<Color>::new());
+
+        container.insert(InheritablePropertyEditorDefinition::<
+            StyledProperty<Thickness>,
+        >::new());
+        container.insert(StyledPropertyEditorDefinition::<Thickness>::new());
+
+        container.insert(InheritablePropertyEditorDefinition::<
+            StyledProperty<TextureResource>,
+        >::new());
+        container.insert(StyledPropertyEditorDefinition::<TextureResource>::new());
 
         reg_inspectables!(
             container,
@@ -760,6 +791,24 @@ impl PropertyEditorDefinitionContainer {
             .is_none());
     }
 
+    pub fn register_inheritable_styleable_inspectable<T>(&self)
+    where
+        T: Reflect + FieldValue,
+    {
+        assert!(self
+            .insert(InspectablePropertyEditorDefinition::<T>::new())
+            .is_none());
+        assert!(self
+            .insert(InheritablePropertyEditorDefinition::<T>::new())
+            .is_none());
+        assert!(self
+            .insert(InheritablePropertyEditorDefinition::<StyledProperty<T>>::new())
+            .is_none());
+        assert!(self
+            .insert(StyledPropertyEditorDefinition::<T>::new())
+            .is_none());
+    }
+
     /// Insert property editor definitions to allow enum T to be edited
     /// using a dropdown list, as well as `InheritableVariable<T>`.
     ///
@@ -773,6 +822,24 @@ impl PropertyEditorDefinitionContainer {
             .is_none());
         assert!(self
             .insert(InheritablePropertyEditorDefinition::<T>::new())
+            .is_none());
+    }
+
+    pub fn register_inheritable_styleable_enum<T, E: Debug>(&self)
+    where
+        T: InspectableEnum + FieldValue + VariantNames + AsRef<str> + FromStr<Err = E> + Debug,
+    {
+        assert!(self
+            .insert(EnumPropertyEditorDefinition::<T>::new())
+            .is_none());
+        assert!(self
+            .insert(InheritablePropertyEditorDefinition::<T>::new())
+            .is_none());
+        assert!(self
+            .insert(InheritablePropertyEditorDefinition::<StyledProperty<T>>::new())
+            .is_none());
+        assert!(self
+            .insert(StyledPropertyEditorDefinition::<T>::new())
             .is_none());
     }
 

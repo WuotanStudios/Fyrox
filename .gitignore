@@ -14,6 +14,12 @@
 /fyrox-impl/test_output
 history.bin
 settings.ron
+/template-core/*.version
+
+# Nix/NixOS
+.direnv/
+.envrc
+!flake.lock
 
 # from https://github.com/github/gitignore/blob/master/Global/VisualStudioCode.gitignore
 .vscode/*
@@ -102,3 +108,7 @@ fabric.properties
 
 # Android studio 3.1+ serialized cache file
 .idea/caches/build_file_checksums.ser
+
+# Resource Metadata
+*.meta
+*.registry

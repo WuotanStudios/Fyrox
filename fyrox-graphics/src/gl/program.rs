@@ -18,27 +18,20 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::gpu_program::ShaderPropertyKind;
 use crate::{
-    core::{
-        log::{Log, MessageKind},
-        ImmutableString,
-    },
+    core::log::{Log, MessageKind},
     error::FrameworkError,
-    gl::server::{GlGraphicsServer, GlKind},
+    gl::{
+        server::{GlGraphicsServer, GlKind},
+        ToGlConstant,
+    },
     gpu_program::{
-        GpuProgram, SamplerKind, ShaderResourceDefinition, ShaderResourceKind, UniformLocation,
+        GpuProgramTrait, GpuShaderTrait, SamplerKind, ShaderKind, ShaderPropertyKind,
+        ShaderResourceDefinition, ShaderResourceKind,
     },
 };
-use fxhash::FxHashMap;
 use glow::HasContext;
-use std::{
-    any::Any,
-    cell::RefCell,
-    marker::PhantomData,
-    ops::Deref,
-    rc::{Rc, Weak},
-};
+use std::{marker::PhantomData, ops::Range, rc::Weak};
 
 impl SamplerKind {
     pub fn glsl_name(&self) -> &str {
@@ -55,43 +48,274 @@ impl SamplerKind {
     }
 }
 
-unsafe fn create_shader(
-    server: &GlGraphicsServer,
-    name: String,
-    actual_type: u32,
-    source: &str,
-    gl_kind: GlKind,
-) -> Result<glow::Shader, FrameworkError> {
-    let merged_source = prepare_source_code(source, gl_kind);
+fn count_lines(src: &str) -> isize {
+    src.bytes().filter(|b| *b == b'\n').count() as isize
+}
 
-    let shader = server.gl.create_shader(actual_type)?;
-    server.gl.shader_source(shader, &merged_source);
-    server.gl.compile_shader(shader);
+enum Vendor {
+    Nvidia,
+    Intel,
+    Amd,
+    Other,
+}
 
-    let status = server.gl.get_shader_compile_status(shader);
-    let compilation_message = server.gl.get_shader_info_log(shader);
-
-    if !status {
-        Log::writeln(
-            MessageKind::Error,
-            format!("Failed to compile {name} shader: {compilation_message}"),
-        );
-        Err(FrameworkError::ShaderCompilationFailed {
-            shader_name: name,
-            error_message: compilation_message,
-        })
-    } else {
-        let msg = if compilation_message.is_empty()
-            || compilation_message.chars().all(|c| c.is_whitespace())
-        {
-            format!("Shader {name} compiled successfully!")
+impl Vendor {
+    fn from_str(str: String) -> Self {
+        if str.contains("nvidia") {
+            Self::Nvidia
+        } else if str.contains("amd") {
+            Self::Amd
+        } else if str.contains("intel") {
+            Self::Intel
         } else {
-            format!("Shader {name} compiled successfully!\nAdditional info: {compilation_message}")
-        };
+            Self::Other
+        }
+    }
 
-        Log::writeln(MessageKind::Information, msg);
+    fn regex(&self) -> regex::Regex {
+        match self {
+            Self::Nvidia => regex::Regex::new(r"\([0-9]*\)").unwrap(),
+            Self::Intel | Vendor::Amd => regex::Regex::new(r"[0-9]*:").unwrap(),
+            Self::Other => regex::Regex::new(r":[0-9]*").unwrap(),
+        }
+    }
 
-        Ok(shader)
+    fn line_number_range(&self, match_range: regex::Match) -> Range<usize> {
+        match self {
+            Self::Nvidia => (match_range.start() + 1)..(match_range.end() - 1),
+            Self::Intel | Vendor::Amd => match_range.start()..(match_range.end() - 1),
+            Self::Other => (match_range.start() + 1)..match_range.end(),
+        }
+    }
+
+    fn format_line(&self, new_line_number: isize) -> String {
+        match self {
+            Vendor::Nvidia => {
+                format!("({new_line_number})")
+            }
+            Vendor::Intel | Vendor::Amd => {
+                format!("{new_line_number}:")
+            }
+            Vendor::Other => format!(":{new_line_number}"),
+        }
+    }
+}
+
+fn patch_error_message(vendor: Vendor, src: &mut String, line_offset: isize) {
+    let re = vendor.regex();
+    let mut offset = 0;
+    while let Some(result) = re.find_at(src, offset) {
+        offset += result.end();
+        let range = vendor.line_number_range(result);
+        let substr = &src[range];
+        if let Ok(line_number) = substr.parse::<isize>() {
+            let new_line_number = line_number + line_offset;
+            let new_substr = vendor.format_line(new_line_number);
+            src.replace_range(result.range(), &new_substr);
+        }
+    }
+}
+
+pub struct GlShader {
+    state: Weak<GlGraphicsServer>,
+    pub id: glow::Shader,
+}
+
+impl ToGlConstant for ShaderKind {
+    fn into_gl(self) -> u32 {
+        match self {
+            ShaderKind::Vertex => glow::VERTEX_SHADER,
+            ShaderKind::Fragment => glow::FRAGMENT_SHADER,
+        }
+    }
+}
+
+impl GpuShaderTrait for GlShader {}
+
+impl GlShader {
+    pub fn new(
+        server: &GlGraphicsServer,
+        name: String,
+        kind: ShaderKind,
+        mut source: String,
+        resources: &[ShaderResourceDefinition],
+        mut line_offset: isize,
+    ) -> Result<Self, FrameworkError> {
+        // Initial validation. The program will be validated once more by the compiler.
+        for resource in resources {
+            for other_resource in resources {
+                if std::ptr::eq(resource, other_resource) {
+                    continue;
+                }
+
+                if std::mem::discriminant(&resource.kind)
+                    == std::mem::discriminant(&other_resource.kind)
+                {
+                    if resource.binding == other_resource.binding {
+                        return Err(FrameworkError::Custom(format!(
+                            "Resource {} and {} using the same binding point {} \
+                            in the {name} GPU program.",
+                            resource.name, other_resource.name, resource.binding
+                        )));
+                    }
+
+                    if resource.name == other_resource.name {
+                        return Err(FrameworkError::Custom(format!(
+                            "There are two or more resources with same name {} \
+                                in the {name} GPU program.",
+                            resource.name
+                        )));
+                    }
+                }
+            }
+        }
+
+        // Generate appropriate texture binding points and uniform blocks for the specified properties.
+
+        let mut texture_bindings = String::new();
+
+        for property in resources {
+            let resource_name = &property.name;
+            match property.kind {
+                ShaderResourceKind::Texture { kind, .. } => {
+                    let glsl_name = kind.glsl_name();
+                    texture_bindings += &format!("uniform {glsl_name} {resource_name};\n");
+                }
+                ShaderResourceKind::PropertyGroup(ref fields) => {
+                    if fields.is_empty() {
+                        Log::warn(format!(
+                            "Uniform block {resource_name} is empty and will be ignored!"
+                        ));
+                        continue;
+                    }
+                    let mut block = format!("struct T{resource_name}{{\n");
+                    for field in fields {
+                        let field_name = &field.name;
+                        match field.kind {
+                            ShaderPropertyKind::Float { .. } => {
+                                block += &format!("\tfloat {field_name};\n");
+                            }
+                            ShaderPropertyKind::FloatArray { max_len, .. } => {
+                                block += &format!("\tfloat {field_name}[{max_len}];\n");
+                            }
+                            ShaderPropertyKind::Int { .. } => {
+                                block += &format!("\tint {field_name};\n");
+                            }
+                            ShaderPropertyKind::IntArray { max_len, .. } => {
+                                block += &format!("\tint {field_name}[{max_len}];\n");
+                            }
+                            ShaderPropertyKind::UInt { .. } => {
+                                block += &format!("\tuint {field_name};\n");
+                            }
+                            ShaderPropertyKind::UIntArray { max_len, .. } => {
+                                block += &format!("\tuint {field_name}[{max_len}];\n");
+                            }
+                            ShaderPropertyKind::Bool { .. } => {
+                                block += &format!("\tbool {field_name};\n");
+                            }
+                            ShaderPropertyKind::Vector2 { .. } => {
+                                block += &format!("\tvec2 {field_name};\n");
+                            }
+                            ShaderPropertyKind::Vector2Array { max_len, .. } => {
+                                block += &format!("\tvec2 {field_name}[{max_len}];\n");
+                            }
+                            ShaderPropertyKind::Vector3 { .. } => {
+                                block += &format!("\tvec3 {field_name};\n");
+                            }
+                            ShaderPropertyKind::Vector3Array { max_len, .. } => {
+                                block += &format!("\tvec3 {field_name}[{max_len}];\n");
+                            }
+                            ShaderPropertyKind::Vector4 { .. } => {
+                                block += &format!("\tvec4 {field_name};\n");
+                            }
+                            ShaderPropertyKind::Vector4Array { max_len, .. } => {
+                                block += &format!("\tvec4 {field_name}[{max_len}];\n");
+                            }
+                            ShaderPropertyKind::Matrix2 { .. } => {
+                                block += &format!("\tmat2 {field_name};\n");
+                            }
+                            ShaderPropertyKind::Matrix2Array { max_len, .. } => {
+                                block += &format!("\tmat2 {field_name}[{max_len}];\n");
+                            }
+                            ShaderPropertyKind::Matrix3 { .. } => {
+                                block += &format!("\tmat3 {field_name};\n");
+                            }
+                            ShaderPropertyKind::Matrix3Array { max_len, .. } => {
+                                block += &format!("\tmat3 {field_name}[{max_len}];\n");
+                            }
+                            ShaderPropertyKind::Matrix4 { .. } => {
+                                block += &format!("\tmat4 {field_name};\n");
+                            }
+                            ShaderPropertyKind::Matrix4Array { max_len, .. } => {
+                                block += &format!("\tmat4 {field_name}[{max_len}];\n");
+                            }
+                            ShaderPropertyKind::Color { .. } => {
+                                block += &format!("\tvec4 {field_name};\n");
+                            }
+                        }
+                    }
+                    block += "};\n";
+                    block += &format!("layout(std140) uniform U{resource_name} {{ T{resource_name} {resource_name}; }};\n");
+                    source.insert_str(0, &block);
+                    line_offset -= count_lines(&block);
+                }
+            }
+        }
+        source.insert_str(0, &texture_bindings);
+        line_offset -= count_lines(&texture_bindings);
+
+        unsafe {
+            let gl_kind = server.gl_kind();
+            let initial_lines_count = count_lines(&source);
+            let merged_source = prepare_source_code(&source, gl_kind);
+            line_offset -= count_lines(&merged_source) - initial_lines_count;
+
+            let shader = server.gl.create_shader(kind.into_gl())?;
+            server.gl.shader_source(shader, &merged_source);
+            server.gl.compile_shader(shader);
+
+            let status = server.gl.get_shader_compile_status(shader);
+            let mut compilation_message = server.gl.get_shader_info_log(shader);
+
+            if !status {
+                let vendor_str = server.gl.get_parameter_string(glow::VENDOR).to_lowercase();
+                let vendor = Vendor::from_str(vendor_str);
+                patch_error_message(vendor, &mut compilation_message, line_offset);
+                Log::writeln(
+                    MessageKind::Error,
+                    format!("Failed to compile {name} shader:\n{compilation_message}"),
+                );
+                Err(FrameworkError::ShaderCompilationFailed {
+                    shader_name: name,
+                    error_message: compilation_message,
+                })
+            } else {
+                let msg = if compilation_message.is_empty()
+                    || compilation_message.chars().all(|c| c.is_whitespace())
+                {
+                    format!("Shader {name} compiled successfully!")
+                } else {
+                    format!("Shader {name} compiled successfully!\nAdditional info: {compilation_message}")
+                };
+
+                Log::writeln(MessageKind::Information, msg);
+
+                Ok(Self {
+                    id: shader,
+                    state: server.weak(),
+                })
+            }
+        }
+    }
+}
+
+impl Drop for GlShader {
+    fn drop(&mut self) {
+        if let Some(state) = self.state.upgrade() {
+            unsafe {
+                state.gl.delete_shader(self.id);
+            }
+        }
     }
 }
 
@@ -127,173 +351,27 @@ pub struct GlProgram {
     pub id: glow::Program,
     // Force compiler to not implement Send and Sync, because OpenGL is not thread-safe.
     thread_mark: PhantomData<*const u8>,
-    uniform_locations: RefCell<FxHashMap<ImmutableString, Option<UniformLocation>>>,
-}
-
-#[inline]
-fn fetch_uniform_location(
-    server: &GlGraphicsServer,
-    program: glow::Program,
-    id: &str,
-) -> Option<UniformLocation> {
-    unsafe {
-        server
-            .gl
-            .get_uniform_location(program, id)
-            .map(|id| UniformLocation {
-                id,
-                thread_mark: PhantomData,
-            })
-    }
-}
-
-pub fn fetch_uniform_block_index(
-    server: &GlGraphicsServer,
-    program: glow::Program,
-    name: &str,
-) -> Option<usize> {
-    unsafe {
-        server
-            .gl
-            .get_uniform_block_index(program, name)
-            .map(|index| index as usize)
-    }
 }
 
 impl GlProgram {
-    pub fn from_source_and_properties(
+    pub fn from_source_and_resources(
         server: &GlGraphicsServer,
         program_name: &str,
-        vertex_source: &str,
-        fragment_source: &str,
+        vertex_source: String,
+        vertex_source_line_offset: isize,
+        fragment_source: String,
+        fragment_source_line_offset: isize,
         resources: &[ShaderResourceDefinition],
     ) -> Result<GlProgram, FrameworkError> {
-        let mut vertex_source = vertex_source.to_string();
-        let mut fragment_source = fragment_source.to_string();
-
-        // Initial validation. The program will be validated once more by the compiler.
-        for resource in resources {
-            for other_resource in resources {
-                if std::ptr::eq(resource, other_resource) {
-                    continue;
-                }
-
-                if std::mem::discriminant(&resource.kind)
-                    == std::mem::discriminant(&other_resource.kind)
-                {
-                    if resource.binding == other_resource.binding {
-                        return Err(FrameworkError::Custom(format!(
-                            "Resource {} and {} using the same binding point {} \
-                            in the {program_name} GPU program.",
-                            resource.name, other_resource.name, resource.binding
-                        )));
-                    }
-
-                    if resource.name == other_resource.name {
-                        return Err(FrameworkError::Custom(format!(
-                            "There are two or more resources with same name {} \
-                                in the {program_name} GPU program.",
-                            resource.name
-                        )));
-                    }
-                }
-            }
-        }
-
-        // Generate appropriate texture binding points and uniform blocks for the specified properties.
-        for initial_source in [&mut vertex_source, &mut fragment_source] {
-            let mut texture_bindings = String::new();
-
-            for property in resources {
-                let resource_name = &property.name;
-                match property.kind {
-                    ShaderResourceKind::Texture { kind, .. } => {
-                        let glsl_name = kind.glsl_name();
-                        texture_bindings += &format!("uniform {glsl_name} {resource_name};\n");
-                    }
-                    ShaderResourceKind::PropertyGroup(ref fields) => {
-                        if fields.is_empty() {
-                            Log::warn(format!(
-                                "Uniform block {resource_name} is empty and will be ignored!"
-                            ));
-                            continue;
-                        }
-                        let mut block = format!("struct T{resource_name}{{\n");
-                        for field in fields {
-                            let field_name = &field.name;
-                            match field.kind {
-                                ShaderPropertyKind::Float(_) => {
-                                    block += &format!("\tfloat {field_name};\n");
-                                }
-                                ShaderPropertyKind::FloatArray { max_len, .. } => {
-                                    block += &format!("\tfloat {field_name}[{max_len}];\n");
-                                }
-                                ShaderPropertyKind::Int(_) => {
-                                    block += &format!("\tint {field_name};\n");
-                                }
-                                ShaderPropertyKind::IntArray { max_len, .. } => {
-                                    block += &format!("\tint {field_name}[{max_len}];\n");
-                                }
-                                ShaderPropertyKind::UInt(_) => {
-                                    block += &format!("\tuint {field_name};\n");
-                                }
-                                ShaderPropertyKind::UIntArray { max_len, .. } => {
-                                    block += &format!("\tuint {field_name}[{max_len}];\n");
-                                }
-                                ShaderPropertyKind::Bool(_) => {
-                                    block += &format!("\tbool {field_name};\n");
-                                }
-                                ShaderPropertyKind::Vector2(_) => {
-                                    block += &format!("\tvec2 {field_name};\n");
-                                }
-                                ShaderPropertyKind::Vector2Array { max_len, .. } => {
-                                    block += &format!("\tvec2 {field_name}[{max_len}];\n");
-                                }
-                                ShaderPropertyKind::Vector3(_) => {
-                                    block += &format!("\tvec3 {field_name};\n");
-                                }
-                                ShaderPropertyKind::Vector3Array { max_len, .. } => {
-                                    block += &format!("\tvec3 {field_name}[{max_len}];\n");
-                                }
-                                ShaderPropertyKind::Vector4(_) => {
-                                    block += &format!("\tvec4 {field_name};\n");
-                                }
-                                ShaderPropertyKind::Vector4Array { max_len, .. } => {
-                                    block += &format!("\tvec4 {field_name}[{max_len}];\n");
-                                }
-                                ShaderPropertyKind::Matrix2(_) => {
-                                    block += &format!("\tmat2 {field_name};\n");
-                                }
-                                ShaderPropertyKind::Matrix2Array { max_len, .. } => {
-                                    block += &format!("\tmat2 {field_name}[{max_len}];\n");
-                                }
-                                ShaderPropertyKind::Matrix3(_) => {
-                                    block += &format!("\tmat3 {field_name};\n");
-                                }
-                                ShaderPropertyKind::Matrix3Array { max_len, .. } => {
-                                    block += &format!("\tmat3 {field_name}[{max_len}];\n");
-                                }
-                                ShaderPropertyKind::Matrix4(_) => {
-                                    block += &format!("\tmat4 {field_name};\n");
-                                }
-                                ShaderPropertyKind::Matrix4Array { max_len, .. } => {
-                                    block += &format!("\tmat4 {field_name}[{max_len}];\n");
-                                }
-                                ShaderPropertyKind::Color { .. } => {
-                                    block += &format!("\tvec4 {field_name};\n");
-                                }
-                            }
-                        }
-                        block += "};\n";
-                        block += &format!("layout(std140) uniform U{resource_name} {{ T{resource_name} {resource_name}; }};\n");
-                        initial_source.insert_str(0, &block);
-                    }
-                }
-            }
-            initial_source.insert_str(0, &texture_bindings);
-        }
-
-        let program = Self::from_source(server, program_name, &vertex_source, &fragment_source)?;
+        let program = Self::from_source(
+            server,
+            program_name,
+            vertex_source,
+            vertex_source_line_offset,
+            fragment_source,
+            fragment_source_line_offset,
+            resources,
+        )?;
 
         unsafe {
             server.set_program(Some(program.id));
@@ -333,32 +411,35 @@ impl GlProgram {
         Ok(program)
     }
 
-    pub fn from_source(
+    fn from_source(
         server: &GlGraphicsServer,
         name: &str,
-        vertex_source: &str,
-        fragment_source: &str,
+        vertex_source: String,
+        vertex_source_line_offset: isize,
+        fragment_source: String,
+        fragment_source_line_offset: isize,
+        resources: &[ShaderResourceDefinition],
     ) -> Result<GlProgram, FrameworkError> {
         unsafe {
-            let vertex_shader = create_shader(
+            let vertex_shader = GlShader::new(
                 server,
                 format!("{name}_VertexShader"),
-                glow::VERTEX_SHADER,
+                ShaderKind::Vertex,
                 vertex_source,
-                server.gl_kind(),
+                resources,
+                vertex_source_line_offset,
             )?;
-            let fragment_shader = create_shader(
+            let fragment_shader = GlShader::new(
                 server,
                 format!("{name}_FragmentShader"),
-                glow::FRAGMENT_SHADER,
+                ShaderKind::Fragment,
                 fragment_source,
-                server.gl_kind(),
+                resources,
+                fragment_source_line_offset,
             )?;
             let program = server.gl.create_program()?;
-            server.gl.attach_shader(program, vertex_shader);
-            server.gl.delete_shader(vertex_shader);
-            server.gl.attach_shader(program, fragment_shader);
-            server.gl.delete_shader(fragment_shader);
+            server.gl.attach_shader(program, vertex_shader.id);
+            server.gl.attach_shader(program, fragment_shader.id);
             server.gl.link_program(program);
             let status = server.gl.get_program_link_status(program);
             let link_message = server.gl.get_program_info_log(program);
@@ -387,64 +468,13 @@ impl GlProgram {
                     state: server.weak(),
                     id: program,
                     thread_mark: PhantomData,
-                    uniform_locations: Default::default(),
                 })
             }
         }
     }
-
-    pub fn uniform_location_internal(&self, name: &ImmutableString) -> Option<UniformLocation> {
-        let mut locations = self.uniform_locations.borrow_mut();
-        let server = self.state.upgrade().unwrap();
-        if let Some(cached_location) = locations.get(name) {
-            cached_location.clone()
-        } else {
-            let location = fetch_uniform_location(&server, self.id, name.deref());
-
-            locations.insert(name.clone(), location.clone());
-
-            location
-        }
-    }
-
-    fn bind(&self) -> TempBinding {
-        let server = self.state.upgrade().unwrap();
-        server.set_program(Some(self.id));
-        TempBinding { server }
-    }
 }
 
-struct TempBinding {
-    server: Rc<GlGraphicsServer>,
-}
-
-impl GpuProgram for GlProgram {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-
-    fn uniform_location(&self, name: &ImmutableString) -> Result<UniformLocation, FrameworkError> {
-        self.uniform_location_internal(name)
-            .ok_or_else(|| FrameworkError::UnableToFindShaderUniform(name.deref().to_owned()))
-    }
-
-    fn uniform_block_index(&self, name: &ImmutableString) -> Result<usize, FrameworkError> {
-        unsafe {
-            self.bind()
-                .server
-                .gl
-                .get_uniform_block_index(self.id, name)
-                .map(|index| index as usize)
-                .ok_or_else(|| {
-                    FrameworkError::UnableToFindShaderUniformBlock(name.deref().to_owned())
-                })
-        }
-    }
-}
+impl GpuProgramTrait for GlProgram {}
 
 impl Drop for GlProgram {
     fn drop(&mut self) {
@@ -453,5 +483,23 @@ impl Drop for GlProgram {
                 state.gl.delete_program(self.id);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::gl::program::{patch_error_message, Vendor};
+
+    #[test]
+    fn test_line_correction() {
+        let mut err_msg = r#"0(62) : error C0000: syntax error, unexpected identifier, expecting '{' at token "vertexPosition"
+        0(66) : error C1503: undefined variable "vertexPosition""#.to_string();
+
+        patch_error_message(Vendor::Nvidia, &mut err_msg, 10);
+
+        let expected_result = r#"0(72) : error C0000: syntax error, unexpected identifier, expecting '{' at token "vertexPosition"
+        0(76) : error C1503: undefined variable "vertexPosition""#;
+
+        assert_eq!(err_msg, expected_result);
     }
 }

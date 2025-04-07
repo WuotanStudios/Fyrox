@@ -25,41 +25,44 @@ pub mod menu;
 pub mod selection;
 pub mod utils;
 
-use crate::fyrox::{
-    core::{
-        algebra::{Vector2, Vector3},
-        color::Color,
-        futures::executor::block_on,
-        log::Log,
-        make_relative_path,
-        math::Rect,
-        pool::{ErasedHandle, Handle},
-        reflect::Reflect,
-    },
-    engine::Engine,
-    fxhash::FxHashSet,
-    graph::SceneGraph,
-    graph::{BaseSceneGraph, SceneGraphNode},
-    gui::{
-        absm::AnimationBlendingStateMachine,
-        animation::AnimationPlayer,
-        brush::Brush,
-        draw::{CommandTexture, Draw},
-        inspector::PropertyChanged,
-        message::{KeyCode, MessageDirection, MouseButton},
-        UiNode, UiUpdateSwitches, UserInterface, UserInterfaceResourceExtension,
-    },
-    renderer::framework::gpu_texture::PixelKind,
-    resource::texture::{TextureKind, TextureResource, TextureResourceExtension},
-    scene::SceneContainer,
+use crate::plugins::inspector::editors::handle::{
+    HandlePropertyEditorHierarchyMessage, HandlePropertyEditorNameMessage,
 };
-use crate::plugins::absm::{command::fetch_machine, selection::SelectedEntity};
-use crate::plugins::animation::{self, command::fetch_animations_container};
-use crate::plugins::inspector::editors::handle::HandlePropertyEditorMessage;
 use crate::{
     asset::item::AssetItem,
     command::{make_command, Command, CommandGroup, CommandStack},
+    fyrox::{
+        core::{
+            algebra::{Vector2, Vector3},
+            color::Color,
+            futures::executor::block_on,
+            log::Log,
+            make_relative_path,
+            math::Rect,
+            pool::{ErasedHandle, Handle},
+            reflect::Reflect,
+        },
+        engine::Engine,
+        fxhash::FxHashSet,
+        graph::{BaseSceneGraph, SceneGraph, SceneGraphNode},
+        gui::{
+            absm::AnimationBlendingStateMachine,
+            animation::AnimationPlayer,
+            brush::Brush,
+            draw::{CommandTexture, Draw},
+            inspector::PropertyChanged,
+            message::{KeyCode, MessageDirection, MouseButton},
+            UiNode, UiUpdateSwitches, UserInterface, UserInterfaceResourceExtension,
+        },
+        renderer::framework::gpu_texture::PixelKind,
+        resource::texture::{TextureKind, TextureResource, TextureResourceExtension},
+        scene::SceneContainer,
+    },
     message::MessageSender,
+    plugins::{
+        absm::{command::fetch_machine, selection::SelectedEntity},
+        animation::{self, command::fetch_animations_container},
+    },
     scene::{
         commands::ChangeSelectionCommand, controller::SceneController, selector::HierarchyNode,
         Selection,
@@ -74,7 +77,8 @@ use crate::{
     },
     Message,
 };
-use std::{any::Any, fs::File, io::Write, path::Path};
+use fyrox::gui::message::UiMessage;
+use std::{fs::File, io::Write, path::Path};
 
 pub struct PreviewInstance {
     pub instance: Handle<UiNode>,
@@ -116,14 +120,6 @@ impl UiScene {
 }
 
 impl SceneController for UiScene {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-
     fn on_key_up(
         &mut self,
         _key: KeyCode,
@@ -467,24 +463,23 @@ impl SceneController for UiScene {
                 self.select_object(*handle);
             }
             Message::SyncNodeHandleName { view, handle } => {
-                engine
-                    .user_interfaces
-                    .first_mut()
-                    .send_message(HandlePropertyEditorMessage::name(
-                        *view,
-                        MessageDirection::ToWidget,
+                engine.user_interfaces.first_mut().send_message(
+                    UiMessage::with_data(HandlePropertyEditorNameMessage(
                         self.ui
                             .try_get((*handle).into())
                             .map(|n| n.name().to_owned()),
-                    ));
+                    ))
+                    .with_destination(*view)
+                    .with_direction(MessageDirection::ToWidget),
+                );
             }
             Message::ProvideSceneHierarchy { view } => {
                 engine.user_interfaces.first_mut().send_message(
-                    HandlePropertyEditorMessage::hierarchy(
-                        *view,
-                        MessageDirection::ToWidget,
-                        HierarchyNode::from_ui_node(self.ui.root(), Handle::NONE, &self.ui),
-                    ),
+                    UiMessage::with_data(HandlePropertyEditorHierarchyMessage(
+                        HierarchyNode::from_scene_node(self.ui.root(), Handle::NONE, &self.ui),
+                    ))
+                    .with_destination(*view)
+                    .with_direction(MessageDirection::ToWidget),
                 );
             }
             _ => {}

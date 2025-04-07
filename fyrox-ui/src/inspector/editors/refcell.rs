@@ -64,32 +64,6 @@ where
     }
 }
 
-fn make_proxy<'a, 'b, 'c, T>(
-    value: &'a T,
-    property_info: &'b FieldInfo<'a, 'c>,
-) -> Result<FieldInfo<'a, 'c>, InspectorError>
-where
-    T: Reflect + FieldValue,
-    'b: 'a,
-{
-    Ok(FieldInfo {
-        owner_type_id: TypeId::of::<T>(),
-        name: property_info.name,
-        display_name: property_info.display_name,
-        value,
-        reflect_value: value,
-        read_only: property_info.read_only,
-        immutable_collection: property_info.immutable_collection,
-        min_value: property_info.min_value,
-        max_value: property_info.max_value,
-        step: property_info.step,
-        precision: property_info.precision,
-        description: property_info.description,
-        type_name: property_info.type_name,
-        doc: property_info.doc,
-    })
-}
-
 impl<T> PropertyEditorDefinition for RefCellPropertyEditorDefinition<T>
 where
     T: Reflect + FieldValue,
@@ -107,12 +81,32 @@ where
             .definitions()
             .get(&TypeId::of::<T>())
         {
-            let value = ctx.property_info.cast_value::<RefCell<T>>()?.borrow();
+            let property_info = ctx.property_info;
+
+            let value = property_info.cast_value::<RefCell<T>>()?.borrow();
+
+            let proxy_property_info = FieldRef {
+                metadata: &FieldMetadata {
+                    name: property_info.name,
+                    display_name: property_info.display_name,
+                    read_only: property_info.read_only,
+                    immutable_collection: property_info.immutable_collection,
+                    min_value: property_info.min_value,
+                    max_value: property_info.max_value,
+                    step: property_info.step,
+                    precision: property_info.precision,
+                    description: property_info.description,
+                    tag: property_info.tag,
+                    doc: property_info.doc,
+                },
+                value: &*value,
+            };
+
             definition
                 .property_editor
                 .create_instance(PropertyEditorBuildContext {
                     build_context: ctx.build_context,
-                    property_info: &make_proxy::<T>(&value, ctx.property_info)?,
+                    property_info: &proxy_property_info,
                     environment: ctx.environment.clone(),
                     definition_container: ctx.definition_container.clone(),
                     sync_flag: ctx.sync_flag,
@@ -135,11 +129,31 @@ where
             .definitions()
             .get(&TypeId::of::<T>())
         {
+            let property_info = ctx.property_info;
+
             let value = ctx.property_info.cast_value::<RefCell<T>>()?.borrow();
+
+            let proxy_property_info = FieldRef {
+                metadata: &FieldMetadata {
+                    name: property_info.name,
+                    display_name: property_info.display_name,
+                    read_only: property_info.read_only,
+                    immutable_collection: property_info.immutable_collection,
+                    min_value: property_info.min_value,
+                    max_value: property_info.max_value,
+                    step: property_info.step,
+                    precision: property_info.precision,
+                    description: property_info.description,
+                    tag: property_info.tag,
+                    doc: property_info.doc,
+                },
+                value: &*value,
+            };
+
             return definition
                 .property_editor
                 .create_message(PropertyEditorMessageContext {
-                    property_info: &make_proxy::<T>(&value, ctx.property_info)?,
+                    property_info: &proxy_property_info,
                     environment: ctx.environment.clone(),
                     definition_container: ctx.definition_container.clone(),
                     sync_flag: ctx.sync_flag,
@@ -166,7 +180,7 @@ where
                 PropertyEditorTranslationContext {
                     environment: ctx.environment.clone(),
                     name: ctx.name,
-                    owner_type_id: ctx.owner_type_id,
+
                     message: ctx.message,
                     definition_container: ctx.definition_container.clone(),
                 },

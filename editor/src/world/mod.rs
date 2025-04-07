@@ -26,26 +26,26 @@ use crate::{
         gui::{
             border::BorderBuilder,
             button::{ButtonBuilder, ButtonMessage},
-            check_box::{CheckBoxBuilder, CheckBoxMessage},
             decorator::{Decorator, DecoratorBuilder, DecoratorMessage},
             grid::{Column, GridBuilder, Row},
+            image::ImageBuilder,
             message::{MessageDirection, UiMessage},
             scroll_viewer::{ScrollViewerBuilder, ScrollViewerMessage},
             searchbar::{SearchBarBuilder, SearchBarMessage},
             stack_panel::StackPanelBuilder,
-            style::resource::StyleResourceExt,
-            style::Style,
+            style::{resource::StyleResourceExt, Style},
             text::TextBuilder,
+            toggle::{ToggleButtonBuilder, ToggleButtonMessage},
             tree::{
                 TreeBuilder, TreeExpansionStrategy, TreeMessage, TreeRoot, TreeRootBuilder,
                 TreeRootMessage,
             },
-            utils::make_image_button_with_tooltip,
+            utils::{make_image_button_with_tooltip, make_simple_tooltip},
             widget::{WidgetBuilder, WidgetMessage},
             window::{WindowBuilder, WindowTitle},
             wrap_panel::WrapPanelBuilder,
-            BuildContext, Orientation, RcUiNodeHandle, Thickness, UiNode, UserInterface,
-            VerticalAlignment,
+            BuildContext, HorizontalAlignment, Orientation, RcUiNodeHandle, Thickness, UiNode,
+            UserInterface, VerticalAlignment,
         },
         resource::texture::TextureResource,
     },
@@ -207,7 +207,7 @@ fn fetch_expanded_state(
         .as_ref()
         .and_then(|p| settings.scene_settings.get(*p))
         .and_then(|s| s.node_infos.get(&node))
-        .map_or(true, |i| i.is_expanded)
+        .is_none_or(|i| i.is_expanded)
 }
 
 impl WorldViewer {
@@ -220,85 +220,112 @@ impl WorldViewer {
         let expand_all;
         let locate_selection;
         let scroll_view;
-        let track_selection;
         let search_bar = SearchBarBuilder::new(
             WidgetBuilder::new()
                 .with_tab_index(Some(4))
-                .on_row(1)
-                .with_margin(Thickness::uniform(1.0)),
+                .on_row(0)
+                .on_column(1)
+                .with_margin(Thickness::uniform(2.0)),
         )
         .build(ctx);
+
         let size = 15.0;
+
+        let track_selection_tooltip = make_simple_tooltip(
+            ctx,
+            "Track selection. If enabled, \
+        then the world viewer will automatically scroll to the \
+        selected object. If multiple objects are selected then \
+        first one will be brought into view.",
+        );
+
+        let track_selection = ToggleButtonBuilder::new(
+            WidgetBuilder::new()
+                .with_tab_index(Some(3))
+                .with_vertical_alignment(VerticalAlignment::Center)
+                .with_margin(Thickness::uniform(1.0))
+                .with_width(22.0)
+                .with_height(22.0)
+                .with_tooltip(track_selection_tooltip),
+        )
+        .with_content(
+            ImageBuilder::new(
+                WidgetBuilder::new()
+                    .with_margin(Thickness::uniform(1.0))
+                    .with_width(10.0)
+                    .with_height(14.0)
+                    .with_horizontal_alignment(HorizontalAlignment::Center)
+                    .with_vertical_alignment(VerticalAlignment::Center),
+            )
+            .with_opt_texture(load_image!("../../resources/track.png"))
+            .build(ctx),
+        )
+        .with_toggled(settings.selection.track_selection)
+        .build(ctx);
+
+        let buttons = StackPanelBuilder::new(
+            WidgetBuilder::new()
+                .with_margin(Thickness::uniform(1.0))
+                .on_row(0)
+                .on_column(0)
+                .with_child({
+                    collapse_all = make_image_button_with_tooltip(
+                        ctx,
+                        size,
+                        size,
+                        load_image!("../../resources/collapse.png"),
+                        "Collapse Everything",
+                        Some(0),
+                    );
+                    collapse_all
+                })
+                .with_child({
+                    expand_all = make_image_button_with_tooltip(
+                        ctx,
+                        size,
+                        size,
+                        load_image!("../../resources/expand.png"),
+                        "Expand Everything",
+                        Some(1),
+                    );
+                    expand_all
+                })
+                .with_child({
+                    locate_selection = make_image_button_with_tooltip(
+                        ctx,
+                        size,
+                        size,
+                        load_image!("../../resources/locate.png"),
+                        "Locate Selection",
+                        Some(2),
+                    );
+                    locate_selection
+                })
+                .with_child(track_selection),
+        )
+        .with_orientation(Orientation::Horizontal)
+        .build(ctx);
+
+        let toolbar = GridBuilder::new(
+            WidgetBuilder::new()
+                .with_child(buttons)
+                .with_child(search_bar),
+        )
+        .add_row(Row::auto())
+        .add_column(Column::auto())
+        .add_column(Column::stretch())
+        .build(ctx);
+
         let window = WindowBuilder::new(WidgetBuilder::new().with_name("WorldOutliner"))
             .can_minimize(false)
             .with_title(WindowTitle::text("World Viewer"))
+            .with_tab_label("World")
             .with_content(
                 GridBuilder::new(
                     WidgetBuilder::new()
-                        .with_child(
-                            StackPanelBuilder::new(
-                                WidgetBuilder::new()
-                                    .with_margin(Thickness::uniform(1.0))
-                                    .on_row(0)
-                                    .with_child({
-                                        collapse_all = make_image_button_with_tooltip(
-                                            ctx,
-                                            size,
-                                            size,
-                                            load_image!("../../resources/collapse.png"),
-                                            "Collapse Everything",
-                                            Some(0),
-                                        );
-                                        collapse_all
-                                    })
-                                    .with_child({
-                                        expand_all = make_image_button_with_tooltip(
-                                            ctx,
-                                            size,
-                                            size,
-                                            load_image!("../../resources/expand.png"),
-                                            "Expand Everything",
-                                            Some(1),
-                                        );
-                                        expand_all
-                                    })
-                                    .with_child({
-                                        locate_selection = make_image_button_with_tooltip(
-                                            ctx,
-                                            size,
-                                            size,
-                                            load_image!("../../resources/locate.png"),
-                                            "Locate Selection",
-                                            Some(2),
-                                        );
-                                        locate_selection
-                                    })
-                                    .with_child({
-                                        track_selection = CheckBoxBuilder::new(
-                                            WidgetBuilder::new()
-                                                .with_tab_index(Some(3))
-                                                .with_vertical_alignment(VerticalAlignment::Center)
-                                                .with_margin(Thickness::uniform(1.0)),
-                                        )
-                                        .with_content(
-                                            TextBuilder::new(WidgetBuilder::new())
-                                                .with_vertical_text_alignment(
-                                                    VerticalAlignment::Center,
-                                                )
-                                                .with_text("Track Selection")
-                                                .build(ctx),
-                                        )
-                                        .checked(Some(settings.selection.track_selection))
-                                        .build(ctx);
-                                        track_selection
-                                    }),
-                            )
-                            .with_orientation(Orientation::Horizontal)
-                            .build(ctx),
-                        )
-                        .with_child(search_bar)
+                        .with_child(toolbar)
                         .with_child({
-                            scroll_view = ScrollViewerBuilder::new(WidgetBuilder::new().on_row(2))
+                            scroll_view = ScrollViewerBuilder::new(WidgetBuilder::new().on_row(1))
                                 .with_content({
                                     tree_root = TreeRootBuilder::new(
                                         WidgetBuilder::new().with_tab_index(Some(5)),
@@ -312,7 +339,7 @@ impl WorldViewer {
                         .with_child({
                             node_path = WrapPanelBuilder::new(
                                 WidgetBuilder::new()
-                                    .on_row(3)
+                                    .on_row(2)
                                     .with_vertical_alignment(VerticalAlignment::Top),
                             )
                             .with_orientation(Orientation::Horizontal)
@@ -321,8 +348,7 @@ impl WorldViewer {
                         }),
                 )
                 .add_column(Column::stretch())
-                .add_row(Row::strict(25.0))
-                .add_row(Row::strict(22.0))
+                .add_row(Row::auto())
                 .add_row(Row::stretch())
                 .add_row(Row::auto())
                 .build(ctx),
@@ -691,8 +717,7 @@ impl WorldViewer {
             } else if message.destination() == self.locate_selection {
                 self.locate_selection(&data_provider.selection(), ui)
             }
-        } else if let Some(CheckBoxMessage::Check(Some(value))) = message.data::<CheckBoxMessage>()
-        {
+        } else if let Some(ToggleButtonMessage::Toggled(value)) = message.data() {
             if message.destination() == self.track_selection {
                 settings.selection.track_selection = *value;
                 if *value {
@@ -835,10 +860,10 @@ impl WorldViewer {
     }
 
     pub fn on_configure(&self, ui: &UserInterface, settings: &Settings) {
-        ui.send_message(CheckBoxMessage::checked(
+        ui.send_message(ToggleButtonMessage::toggled(
             self.track_selection,
             MessageDirection::ToWidget,
-            Some(settings.selection.track_selection),
+            settings.selection.track_selection,
         ));
     }
 

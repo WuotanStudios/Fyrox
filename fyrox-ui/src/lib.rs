@@ -259,6 +259,8 @@ pub mod tab_control;
 pub mod text;
 pub mod text_box;
 mod thickness;
+pub mod thumb;
+pub mod toggle;
 pub mod tree;
 pub mod utils;
 pub mod uuid;
@@ -300,15 +302,13 @@ use fyrox_resource::{
     ResourceData,
 };
 use serde::{Deserialize, Serialize};
-use std::any::TypeId;
-use std::ops::{Deref, Index, IndexMut};
 use std::{
-    any::Any,
+    any::TypeId,
     cell::{Ref, RefCell, RefMut},
     collections::{btree_set::BTreeSet, hash_map::Entry, VecDeque},
     error::Error,
     fmt::{Debug, Formatter},
-    ops::DerefMut,
+    ops::{Deref, DerefMut, Index, IndexMut},
     path::Path,
     sync::{
         mpsc::{self, Receiver, Sender, TryRecvError},
@@ -334,7 +334,7 @@ use crate::message::RoutingStrategy;
 use crate::style::resource::{StyleResource, StyleResourceExt};
 use crate::style::{Style, DEFAULT_STYLE};
 pub use fyrox_animation as generic_animation;
-use fyrox_core::pool::ErasedHandle;
+use fyrox_core::pool::{BorrowAs, ErasedHandle};
 use fyrox_resource::untyped::ResourceKind;
 pub use fyrox_texture as texture;
 
@@ -650,10 +650,26 @@ pub struct UiUpdateSwitches {
     pub node_overrides: Option<FxHashSet<Handle<UiNode>>>,
 }
 
+pub type WidgetPool = Pool<UiNode, WidgetContainer>;
+
+impl<T: Control> BorrowAs<UiNode, WidgetContainer> for Handle<T> {
+    type Target = T;
+
+    fn borrow_as_ref(self, pool: &WidgetPool) -> Option<&T> {
+        pool.try_borrow(self.transmute())
+            .and_then(|n| ControlAsAny::as_any(n.0.deref()).downcast_ref::<T>())
+    }
+
+    fn borrow_as_mut(self, pool: &mut WidgetPool) -> Option<&mut T> {
+        pool.try_borrow_mut(self.transmute())
+            .and_then(|n| ControlAsAny::as_any_mut(n.0.deref_mut()).downcast_mut::<T>())
+    }
+}
+
 #[derive(Reflect, Debug)]
 pub struct UserInterface {
     screen_size: Vector2<f32>,
-    nodes: Pool<UiNode, WidgetContainer>,
+    nodes: WidgetPool,
     #[reflect(hidden)]
     drawing_context: DrawingContext,
     visual_debug: bool,
@@ -761,7 +777,11 @@ impl Clone for UserInterface {
             captured_node: self.captured_node,
             keyboard_focus_node: self.keyboard_focus_node,
             cursor_position: self.cursor_position,
-            style: StyleResource::new_ok(ResourceKind::Embedded, Style::dark_style()),
+            style: StyleResource::new_ok(
+                Uuid::new_v4(),
+                ResourceKind::Embedded,
+                Style::dark_style(),
+            ),
             receiver,
             sender,
             stack: self.stack.clone(),
@@ -1049,7 +1069,8 @@ impl UserInterface {
         screen_size: Vector2<f32>,
     ) -> UserInterface {
         let (layout_events_sender, layout_events_receiver) = mpsc::channel();
-        let style = StyleResource::new_ok(ResourceKind::Embedded, Style::dark_style());
+        let style =
+            StyleResource::new_ok(Uuid::new_v4(), ResourceKind::Embedded, Style::dark_style());
         let mut ui = UserInterface {
             screen_size,
             sender,
@@ -1360,6 +1381,10 @@ impl UserInterface {
         self.cursor_icon
     }
 
+    pub fn set_time(&mut self, elapsed_time: f32) {
+        self.drawing_context.elapsed_time = elapsed_time;
+    }
+
     pub fn draw(&mut self) -> &DrawingContext {
         self.drawing_context.clear();
 
@@ -1550,8 +1575,12 @@ impl UserInterface {
 
             size = transform_size(size, &node.layout_transform);
 
-            size.x = size.x.clamp(node.min_size().x, node.max_size().x);
-            size.y = size.y.clamp(node.min_size().y, node.max_size().y);
+            if size.x.is_finite() {
+                size.x = size.x.clamp(node.min_size().x, node.max_size().x);
+            }
+            if size.y.is_finite() {
+                size.y = size.y.clamp(node.min_size().y, node.max_size().y);
+            }
 
             let mut desired_size = node.measure_override(self, size);
 
@@ -1883,6 +1912,26 @@ impl UserInterface {
                                 self.link_nodes(message.destination(), parent, true);
                             }
                         }
+                        WidgetMessage::ReplaceChildren(children) => {
+                            if self.nodes.is_valid_handle(message.destination()) {
+                                let old_children =
+                                    self.node(message.destination()).children().to_vec();
+                                for child in old_children.iter() {
+                                    if self.nodes.is_valid_handle(*child) {
+                                        if children.contains(child) {
+                                            self.unlink_node(*child);
+                                        } else {
+                                            self.remove_node(*child);
+                                        }
+                                    }
+                                }
+                                for &child in children.iter() {
+                                    if self.nodes.is_valid_handle(child) {
+                                        self.link_nodes(child, message.destination(), false);
+                                    }
+                                }
+                            }
+                        }
                         WidgetMessage::Remove => {
                             if self.nodes.is_valid_handle(message.destination()) {
                                 self.remove_node(message.destination());
@@ -2033,7 +2082,7 @@ impl UserInterface {
                             }
                         }
                         WidgetMessage::MouseDown { button, .. } => {
-                            if *button == MouseButton::Right {
+                            if *button == MouseButton::Right && !message.handled() {
                                 if let Some(picked) = self.nodes.try_borrow(self.picked_node) {
                                     // Get the context menu from the current node or a parent node
                                     let (context_menu, target) = if picked.context_menu().is_some()
@@ -2145,7 +2194,7 @@ impl UserInterface {
     /// Find any tooltips that are being hovered and activate them.
     /// As well, update their time.
     fn update_tooltips(&mut self, dt: f32) {
-        let sender = &self.sender;
+        let sender = self.sender.clone();
         if let Some(entry) = self.active_tooltip.as_mut() {
             if entry.shown {
                 entry.disappear_timer -= dt;
@@ -2163,11 +2212,27 @@ impl UserInterface {
                     self.active_tooltip = None;
                 }
             } else {
-                entry.appear_timer -= dt;
-                if entry.appear_timer <= 0.0 {
-                    entry.shown = true;
-                    let tooltip = entry.tooltip.clone();
-                    self.show_tooltip(tooltip);
+                let mut tooltip_owner_hovered = false;
+                let mut handle = self.picked_node;
+                while let Some(node) = self.nodes.try_borrow(handle) {
+                    if let Some(tooltip) = node.tooltip.as_ref() {
+                        if &entry.tooltip == tooltip {
+                            tooltip_owner_hovered = true;
+                            break;
+                        }
+                    }
+                    handle = node.parent();
+                }
+
+                if tooltip_owner_hovered {
+                    entry.appear_timer -= dt;
+                    if entry.appear_timer <= 0.0 {
+                        entry.shown = true;
+                        let tooltip = entry.tooltip.clone();
+                        self.show_tooltip(tooltip);
+                    }
+                } else {
+                    self.active_tooltip = None;
                 }
             }
         }
@@ -2175,8 +2240,6 @@ impl UserInterface {
         // Check for hovering over a widget with a tooltip, or hovering over a tooltip.
         let mut handle = self.picked_node;
         while let Some(node) = self.nodes.try_borrow(handle) {
-            // Get the parent to avoid the problem with having a immutable access here and a
-            // mutable access later
             let parent = node.parent();
 
             if let Some(tooltip) = node.tooltip() {
@@ -3098,7 +3161,15 @@ impl AbstractSceneGraph for UserInterface {
 
 impl BaseSceneGraph for UserInterface {
     type Prefab = Self;
+    type NodeContainer = WidgetContainer;
     type Node = UiNode;
+
+    #[inline]
+    fn actual_type_id(&self, handle: Handle<Self::Node>) -> Option<TypeId> {
+        self.nodes
+            .try_borrow(handle)
+            .map(|n| ControlAsAny::as_any(n.0.deref()).type_id())
+    }
 
     #[inline]
     fn root(&self) -> Handle<Self::Node> {
@@ -3203,6 +3274,18 @@ impl BaseSceneGraph for UserInterface {
             self.nodes[parent_handle].remove_child(node_handle);
         }
     }
+
+    fn derived_type_ids(&self, handle: Handle<Self::Node>) -> Option<Vec<TypeId>> {
+        self.nodes
+            .try_borrow(handle)
+            .map(|n| n.0.query_derived_types().to_vec())
+    }
+
+    fn actual_type_name(&self, handle: Handle<Self::Node>) -> Option<&'static str> {
+        self.nodes
+            .try_borrow(handle)
+            .map(|n| Reflect::type_name(n.0.deref()))
+    }
 }
 
 impl SceneGraph for UserInterface {
@@ -3219,6 +3302,20 @@ impl SceneGraph for UserInterface {
     #[inline]
     fn linear_iter_mut(&mut self) -> impl Iterator<Item = &mut Self::Node> {
         self.nodes.iter_mut()
+    }
+
+    fn typed_ref<Ref>(
+        &self,
+        handle: impl BorrowAs<Self::Node, Self::NodeContainer, Target = Ref>,
+    ) -> Option<&Ref> {
+        self.nodes.typed_ref(handle)
+    }
+
+    fn typed_mut<Ref>(
+        &mut self,
+        handle: impl BorrowAs<Self::Node, Self::NodeContainer, Target = Ref>,
+    ) -> Option<&mut Ref> {
+        self.nodes.typed_mut(handle)
     }
 }
 
@@ -3433,14 +3530,6 @@ fn transform_size(transform_space_bounds: Vector2<f32>, matrix: &Matrix3<f32>) -
 uuid_provider!(UserInterface = "0d065c93-ef9c-4dd2-9fe7-e2b33c1a21b6");
 
 impl ResourceData for UserInterface {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-
     fn type_uuid(&self) -> Uuid {
         <Self as TypeUuidProvider>::type_uuid()
     }

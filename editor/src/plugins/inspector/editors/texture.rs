@@ -44,6 +44,7 @@ use crate::fyrox::{
     resource::texture::{Texture, TextureResource},
 };
 use crate::plugins::inspector::EditorEnvironment;
+
 use std::{
     any::TypeId,
     fmt::{Debug, Formatter},
@@ -51,6 +52,7 @@ use std::{
 };
 
 #[derive(Clone, Visit, Reflect, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct TextureEditor {
     widget: Widget,
     image: Handle<UiNode>,
@@ -102,7 +104,7 @@ impl Control for TextureEditor {
                         ui.send_message(TextureEditorMessage::texture(
                             self.handle(),
                             MessageDirection::ToWidget,
-                            Some(self.resource_manager.request::<Texture>(relative_path)),
+                            self.resource_manager.try_request::<Texture>(relative_path),
                         ));
                     }
                 }
@@ -116,7 +118,7 @@ impl Control for TextureEditor {
                 ui.send_message(ImageMessage::texture(
                     self.image,
                     MessageDirection::ToWidget,
-                    self.texture.clone().map(Into::into),
+                    self.texture.clone(),
                 ));
 
                 ui.send_message(message.reverse());
@@ -158,7 +160,7 @@ impl TextureEditorBuilder {
                         .with_allow_drop(true),
                 )
                 .with_checkerboard_background(true)
-                .with_opt_texture(self.texture.map(Into::into))
+                .with_opt_texture(self.texture)
                 .build(ctx);
                 image
             })
@@ -181,7 +183,7 @@ pub struct TexturePropertyEditorDefinition {
 }
 
 impl TexturePropertyEditorDefinition {
-    fn value(&self, field_info: &FieldInfo) -> Result<Option<TextureResource>, InspectorError> {
+    fn value(&self, field_info: &FieldRef) -> Result<Option<TextureResource>, InspectorError> {
         if self.untyped {
             let value = field_info.cast_value::<Option<UntypedResource>>()?;
             let casted = value.as_ref().and_then(|r| r.try_cast::<Texture>());
@@ -206,22 +208,14 @@ impl PropertyEditorDefinition for TexturePropertyEditorDefinition {
         ctx: PropertyEditorBuildContext,
     ) -> Result<PropertyEditorInstance, InspectorError> {
         let value = self.value(ctx.property_info)?;
+        let environment = EditorEnvironment::try_get_from(&ctx.environment)?;
 
         Ok(PropertyEditorInstance::Simple {
             editor: TextureEditorBuilder::new(
                 WidgetBuilder::new().with_min_size(Vector2::new(0.0, 17.0)),
             )
             .with_texture(value.clone())
-            .build(
-                ctx.build_context,
-                ctx.environment
-                    .as_ref()
-                    .unwrap()
-                    .as_any()
-                    .downcast_ref::<EditorEnvironment>()
-                    .map(|e| e.resource_manager.clone())
-                    .unwrap(),
-            ),
+            .build(ctx.build_context, environment.resource_manager.clone()),
         })
     }
 
@@ -244,7 +238,6 @@ impl PropertyEditorDefinition for TexturePropertyEditorDefinition {
                 ctx.message.data::<TextureEditorMessage>()
             {
                 return Some(PropertyChanged {
-                    owner_type_id: ctx.owner_type_id,
                     name: ctx.name.to_string(),
                     value: if self.untyped {
                         FieldKind::object(value.clone().map(|r| r.into_untyped()))

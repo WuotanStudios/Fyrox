@@ -44,6 +44,7 @@ use crate::plugins::absm::{
     selectable::{Selectable, SelectableMessage},
 };
 use crate::utils::fetch_node_center;
+
 use fyrox::gui::style::resource::StyleResourceExt;
 use fyrox::gui::style::Style;
 use std::ops::{Deref, DerefMut};
@@ -58,6 +59,7 @@ impl TransitionMessage {
 }
 
 #[derive(Clone, Debug, Visit, Reflect, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct TransitionView {
     widget: Widget,
     pub segment: Segment,

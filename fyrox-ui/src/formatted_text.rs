@@ -333,7 +333,7 @@ impl FormattedText {
     }
 
     pub fn end_position(&self) -> Position {
-        match self.lines.iter().enumerate().last() {
+        match self.lines.iter().enumerate().next_back() {
             Some((i, line)) => Position {
                 line: i,
                 offset: line.len(),
@@ -722,7 +722,7 @@ impl FormattedText {
             let mut x = line.x_offset.floor();
             if let Some(mask) = *self.mask_char {
                 let mut prev = None;
-                for c in std::iter::repeat::<char>(mask).take(line.len()) {
+                for c in std::iter::repeat_n(mask, line.len()) {
                     let (glyph, advance) =
                         build_glyph(&mut metrics, x, y, c, prev, self.super_sampling_scale);
                     self.glyphs.push(glyph);

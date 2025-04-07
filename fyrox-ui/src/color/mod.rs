@@ -40,6 +40,7 @@ use crate::{
     widget::{Widget, WidgetBuilder, WidgetMessage},
     BuildContext, Control, Orientation, Thickness, UiNode, UserInterface, VerticalAlignment,
 };
+
 use fyrox_core::uuid_provider;
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
 use fyrox_graph::BaseSceneGraph;
@@ -124,6 +125,7 @@ impl ColorFieldMessage {
 }
 
 #[derive(Default, Clone, Debug, Visit, Reflect, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct AlphaBar {
     pub widget: Widget,
     pub orientation: Orientation,
@@ -399,6 +401,7 @@ impl AlphaBarBuilder {
 }
 
 #[derive(Default, Clone, Debug, Visit, Reflect, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct HueBar {
     pub widget: Widget,
     pub orientation: Orientation,
@@ -562,6 +565,7 @@ impl HueBarBuilder {
 }
 
 #[derive(Default, Clone, Debug, Visit, Reflect, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct SaturationBrightnessField {
     pub widget: Widget,
     pub is_picking: bool,
@@ -776,6 +780,7 @@ impl SaturationBrightnessFieldBuilder {
 }
 
 #[derive(Default, Clone, Debug, Visit, Reflect, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct ColorPicker {
     pub widget: Widget,
     pub hue_bar: Handle<UiNode>,
@@ -1203,6 +1208,7 @@ impl ColorPickerBuilder {
 }
 
 #[derive(Default, Clone, Debug, Visit, Reflect, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct ColorField {
     pub widget: Widget,
     pub popup: Handle<UiNode>,

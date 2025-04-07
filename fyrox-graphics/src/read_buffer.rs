@@ -18,22 +18,28 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::{core::math::Rect, error::FrameworkError, framebuffer::FrameBuffer};
+use crate::{
+    core::math::Rect, define_shared_wrapper, error::FrameworkError,
+    framebuffer::GpuFrameBufferTrait,
+};
 use bytemuck::Pod;
+use fyrox_core::define_as_any_trait;
 
-pub trait AsyncReadBuffer {
+define_as_any_trait!(GpuAsyncReadBufferAsAny => GpuAsyncReadBufferTrait);
+
+pub trait GpuAsyncReadBufferTrait: GpuAsyncReadBufferAsAny {
     fn schedule_pixels_transfer(
-        &mut self,
-        framebuffer: &dyn FrameBuffer,
+        &self,
+        framebuffer: &dyn GpuFrameBufferTrait,
         color_buffer_index: u32,
         rect: Option<Rect<i32>>,
     ) -> Result<(), FrameworkError>;
     fn is_request_running(&self) -> bool;
-    fn try_read(&mut self) -> Option<Vec<u8>>;
+    fn try_read(&self) -> Option<Vec<u8>>;
 }
 
-impl dyn AsyncReadBuffer {
-    pub fn try_read_of_type<T>(&mut self) -> Option<Vec<T>>
+impl dyn GpuAsyncReadBufferTrait {
+    pub fn try_read_of_type<T>(&self) -> Option<Vec<T>>
     where
         T: Pod,
     {
@@ -49,3 +55,5 @@ impl dyn AsyncReadBuffer {
         typed
     }
 }
+
+define_shared_wrapper!(GpuAsyncReadBuffer<dyn GpuAsyncReadBufferTrait>);

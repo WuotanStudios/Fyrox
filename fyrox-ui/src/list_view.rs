@@ -19,12 +19,10 @@
 // SOFTWARE.
 
 //! List view is used to display lists with arbitrary items. It supports single-selection and by default, it stacks the items
-//! vertically.  
+//! vertically.
 
 #![warn(missing_docs)]
 
-use crate::style::resource::StyleResourceExt;
-use crate::style::Style;
 use crate::{
     border::BorderBuilder,
     brush::Brush,
@@ -38,11 +36,15 @@ use crate::{
     message::{KeyCode, MessageDirection, UiMessage},
     scroll_viewer::{ScrollViewer, ScrollViewerBuilder, ScrollViewerMessage},
     stack_panel::StackPanelBuilder,
+    style::{resource::StyleResourceExt, Style},
     widget::{Widget, WidgetBuilder, WidgetMessage},
     BuildContext, Control, Thickness, UiNode, UserInterface,
 };
-use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
-use fyrox_graph::BaseSceneGraph;
+
+use fyrox_graph::{
+    constructor::{ConstructorProvider, GraphNodeConstructor},
+    BaseSceneGraph,
+};
 use std::ops::{Deref, DerefMut};
 
 /// A set of messages that can be used to modify/fetch the state of a [`ListView`] widget at runtime.
@@ -84,7 +86,7 @@ impl ListViewMessage {
 }
 
 /// List view is used to display lists with arbitrary items. It supports single-selection and by default, it stacks the items
-/// vertically.  
+/// vertically.
 ///
 /// ## Example
 ///
@@ -237,6 +239,8 @@ impl ListViewMessage {
 /// }
 /// ```
 #[derive(Default, Clone, Visit, Reflect, Debug, ComponentProvider)]
+#[visit(optional)]
+#[reflect(derived_type = "UiNode")]
 pub struct ListView {
     /// Base widget of the list view.
     pub widget: Widget,
@@ -331,6 +335,7 @@ impl ListView {
 
 /// A wrapper for list view items, that is used to add selection functionality to arbitrary items.
 #[derive(Default, Clone, Visit, Reflect, Debug, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct ListViewItem {
     /// Base widget of the list view item.
     pub widget: Widget,
@@ -419,24 +424,14 @@ impl Control for ListView {
             {
                 match msg {
                     ListViewMessage::Items(items) => {
-                        // Remove previous items.
-                        for child in ui.node(*self.panel).children() {
-                            ui.send_message(WidgetMessage::remove(
-                                *child,
-                                MessageDirection::ToWidget,
-                            ));
-                        }
-
                         // Generate new items.
                         let item_containers = generate_item_containers(&mut ui.build_ctx(), items);
 
-                        for item_container in item_containers.iter() {
-                            ui.send_message(WidgetMessage::link(
-                                *item_container,
-                                MessageDirection::ToWidget,
-                                *self.panel,
-                            ));
-                        }
+                        ui.send_message(WidgetMessage::replace_children(
+                            *self.panel,
+                            MessageDirection::ToWidget,
+                            item_containers.clone(),
+                        ));
 
                         self.item_containers
                             .set_value_and_mark_modified(item_containers);
@@ -546,6 +541,7 @@ pub struct ListViewBuilder {
     items: Vec<Handle<UiNode>>,
     panel: Option<Handle<UiNode>>,
     scroll_viewer: Option<Handle<UiNode>>,
+    selection: Vec<usize>,
 }
 
 impl ListViewBuilder {
@@ -556,6 +552,7 @@ impl ListViewBuilder {
             items: Vec::new(),
             panel: None,
             scroll_viewer: None,
+            selection: Default::default(),
         }
     }
 
@@ -577,9 +574,38 @@ impl ListViewBuilder {
         self
     }
 
+    /// Sets the desired selected items.
+    pub fn with_selection(mut self, items: Vec<usize>) -> Self {
+        self.selection = items;
+        self
+    }
+
     /// Finishes list view building and adds it to the user interface.
     pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
         let item_containers = generate_item_containers(ctx, &self.items);
+
+        // Sync the decorators to the actual state of items.
+        for (i, &container) in item_containers.iter().enumerate() {
+            let select = self.selection.contains(&i);
+            if let Some(container) = ctx[container].cast::<ListViewItem>() {
+                let mut stack = container.children().to_vec();
+                while let Some(handle) = stack.pop() {
+                    let node = &mut ctx[handle];
+                    if node.cast::<ListView>().is_some() {
+                        // Do nothing.
+                    } else if let Some(decorator) = node.cast_mut::<Decorator>() {
+                        decorator.is_selected.set_value_and_mark_modified(select);
+                        if select {
+                            decorator.background = (*decorator.selected_brush).clone().into();
+                        } else {
+                            decorator.background = (*decorator.normal_brush).clone().into();
+                        }
+                    } else {
+                        stack.extend_from_slice(node.children())
+                    }
+                }
+            }
+        }
 
         let panel = self
             .panel
@@ -617,7 +643,7 @@ impl ListViewBuilder {
                 .with_accepts_input(true)
                 .with_child(back)
                 .build(ctx),
-            selection: Default::default(),
+            selection: self.selection,
             item_containers: item_containers.into(),
             items: self.items.into(),
             panel: panel.into(),

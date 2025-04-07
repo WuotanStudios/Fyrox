@@ -147,7 +147,7 @@ impl VertexTrait for SpriteVertex {
 ///         .bind("smoke.png", resource_manager.request::<Texture>("smoke.png"));
 ///
 ///     SpriteBuilder::new(BaseBuilder::new())
-///         .with_material(MaterialResource::new_ok(Default::default(), material))
+///         .with_material(MaterialResource::new_embedded(material))
 ///         .build(graph)
 /// }
 /// ```
@@ -157,6 +157,7 @@ impl VertexTrait for SpriteVertex {
 /// to get best possible performance. Otherwise, each your sprite will be put in a separate batch
 /// which will force your GPU to render a single sprite in dedicated draw call which is quite slow.
 #[derive(Debug, Reflect, Clone, ComponentProvider)]
+#[reflect(derived_type = "Node")]
 pub struct Sprite {
     base: Base,
 
@@ -363,6 +364,7 @@ impl NodeTrait for Sprite {
         let sort_index = ctx.calculate_sorting_index(self.global_position());
 
         ctx.storage.push_triangles(
+            ctx.dynamic_surface_cache,
             Vertex::layout(),
             &self.material,
             RenderPath::Forward,
@@ -402,7 +404,11 @@ impl SpriteBuilder {
     pub fn new(base_builder: BaseBuilder) -> Self {
         Self {
             base_builder,
-            material: MaterialResource::new_ok(Default::default(), Material::standard_sprite()),
+            material: MaterialResource::new_ok(
+                Uuid::new_v4(),
+                Default::default(),
+                Material::standard_sprite(),
+            ),
             uv_rect: Rect::new(0.0, 0.0, 1.0, 1.0),
             color: Color::WHITE,
             size: 0.2,

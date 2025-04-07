@@ -51,8 +51,12 @@ use crate::{
     BuildContext, Control, RcUiNodeHandle, Thickness, UiNode, UserInterface, VerticalAlignment,
 };
 use copypasta::ClipboardProvider;
-use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
-use fyrox_graph::{BaseSceneGraph, SceneGraph};
+
+use fyrox_core::log::Log;
+use fyrox_graph::{
+    constructor::{ConstructorProvider, GraphNodeConstructor},
+    BaseSceneGraph, SceneGraph,
+};
 use std::{
     any::{Any, TypeId},
     fmt::{Debug, Formatter},
@@ -226,7 +230,7 @@ impl PropertyAction {
 }
 
 /// Trait of values that can be edited by an Inspector through reflection.
-pub trait Value: Reflect + Debug + Send {
+pub trait Value: Reflect + Send {
     fn clone_box(&self) -> Box<dyn Value>;
 
     fn into_box_reflect(self: Box<Self>) -> Box<dyn Reflect>;
@@ -319,8 +323,6 @@ impl FieldKind {
 pub struct PropertyChanged {
     /// The name of the edited property.
     pub name: String,
-    /// The type of the object that owns the property.
-    pub owner_type_id: TypeId,
     /// The details of the change.
     pub value: FieldKind,
 }
@@ -392,6 +394,7 @@ impl InspectorMessage {
 /// Instead, when a property editor needs to talk to the application using the Inspector,
 /// it can attempt to cast InspectorEnvironment to whatever type it might be.
 pub trait InspectorEnvironment: Any + Send + Sync {
+    fn name(&self) -> String;
     fn as_any(&self) -> &dyn Any;
 }
 
@@ -475,6 +478,7 @@ pub trait InspectorEnvironment: Any + Send + Sync {
 /// }
 /// ```
 #[derive(Default, Clone, Visit, Reflect, Debug, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct Inspector {
     pub widget: Widget,
     #[reflect(hidden)]
@@ -532,10 +536,12 @@ impl From<CastError> for InspectorError {
 /// Stores the association between a field in an object and an editor widget in an [Inspector].
 #[derive(Clone, Debug)]
 pub struct ContextEntry {
-    /// The name of the field being edited, as found in [FieldInfo::name].
+    /// The name of the field being edited, as found in [FieldMetadata::name].
     pub property_name: String,
-    /// The type of the objects whose fields are being inspected, as found in [FieldInfo::owner_type_id].
-    pub property_owner_type_id: TypeId,
+    /// The name of the field being edited, as found in [FieldMetadata::display_name].
+    pub property_display_name: String,
+    /// The name of the field being edited, as found in [FieldMetadata::tag].
+    pub property_tag: String,
     /// The type of the property being edited, as found in [PropertyEditorDefinition::value_type_id](editors::PropertyEditorDefinition::value_type_id).
     pub property_value_type_id: TypeId,
     /// The list of property editor definitions being used by the inspector.
@@ -839,10 +845,10 @@ impl InspectorContext {
         let mut entries = Vec::new();
 
         let mut fields_text = Vec::new();
-        object.fields(&mut |fields| {
+        object.fields_ref(&mut |fields| {
             for field in fields {
                 fields_text.push(if generate_property_string_values {
-                    format!("{field:?}")
+                    format!("{:?}", field.value.field_value_as_reflect())
                 } else {
                     Default::default()
                 })
@@ -850,9 +856,9 @@ impl InspectorContext {
         });
 
         let mut editors = Vec::new();
-        object.fields_info(&mut |fields_info| {
-            for (i, (field_text, info)) in fields_text.iter().zip(fields_info.iter()).enumerate() {
-                if !filter.pass(info.reflect_value) {
+        object.fields_ref(&mut |fields_ref| {
+            for (i, (field_text, info)) in fields_text.iter().zip(fields_ref.iter()).enumerate() {
+                if !filter.pass(info.value.field_value_as_reflect()) {
                     continue;
                 }
 
@@ -901,7 +907,8 @@ impl InspectorContext {
                                 property_value_type_id: definition.property_editor.value_type_id(),
                                 property_editor_definition_container: definition_container.clone(),
                                 property_name: info.name.to_string(),
-                                property_owner_type_id: info.owner_type_id,
+                                property_display_name: info.display_name.to_string(),
+                                property_tag: info.tag.to_string(),
                                 property_debug_output: field_text.clone(),
                                 property_container: container,
                             });
@@ -912,20 +919,25 @@ impl InspectorContext {
 
                             container
                         }
-                        Err(e) => make_simple_property_container(
-                            create_header(ctx, info.display_name, layer_index),
-                            TextBuilder::new(WidgetBuilder::new().on_row(i).on_column(1))
-                                .with_wrap(WrapMode::Word)
-                                .with_vertical_text_alignment(VerticalAlignment::Center)
-                                .with_text(format!(
-                                    "Unable to create property \
+                        Err(e) => {
+                            Log::err(format!(
+                                "Unable to create property editor instance: Reason {e:?}"
+                            ));
+                            make_simple_property_container(
+                                create_header(ctx, info.display_name, layer_index),
+                                TextBuilder::new(WidgetBuilder::new().on_row(i).on_column(1))
+                                    .with_wrap(WrapMode::Word)
+                                    .with_vertical_text_alignment(VerticalAlignment::Center)
+                                    .with_text(format!(
+                                        "Unable to create property \
                                                     editor instance: Reason {e:?}"
-                                ))
-                                .build(ctx),
-                            &description,
-                            name_column_width,
-                            ctx,
-                        ),
+                                    ))
+                                    .build(ctx),
+                                &description,
+                                name_column_width,
+                                ctx,
+                            )
+                        }
                     };
 
                     editors.push(editor);
@@ -937,7 +949,7 @@ impl InspectorContext {
                             .with_vertical_text_alignment(VerticalAlignment::Center)
                             .with_text(format!(
                                 "Property Editor Is Missing For Type {}!",
-                                info.type_name
+                                info.value.type_name()
                             ))
                             .build(ctx),
                         &description,
@@ -1015,9 +1027,9 @@ impl InspectorContext {
 
         let mut sync_errors = Vec::new();
 
-        object.fields_info(&mut |fields_info| {
-            for info in fields_info {
-                if !filter.pass(info.reflect_value) {
+        object.fields_ref(&mut |fields_ref| {
+            for info in fields_ref {
+                if !filter.pass(info.value.field_value_as_reflect()) {
                     continue;
                 }
 
@@ -1079,6 +1091,11 @@ impl InspectorContext {
     /// Return the entry for the property with the given name.
     pub fn find_property_editor(&self, name: &str) -> Option<&ContextEntry> {
         self.entries.iter().find(|e| e.property_name == name)
+    }
+
+    /// Return the entry for the property with the given tag.
+    pub fn find_property_editor_by_tag(&self, tag: &str) -> Option<&ContextEntry> {
+        self.entries.iter().find(|e| e.property_tag == tag)
     }
 
     /// Shortcut for getting the editor widget from the property with the given name.
@@ -1155,7 +1172,6 @@ impl Control for Inspector {
                                 .translate_message(PropertyEditorTranslationContext {
                                     environment: env.clone(),
                                     name: &entry.property_name,
-                                    owner_type_id: entry.property_owner_type_id,
                                     message,
                                     definition_container: self.context.property_definitions.clone(),
                                 })

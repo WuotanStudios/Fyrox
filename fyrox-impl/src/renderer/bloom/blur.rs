@@ -18,54 +18,29 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+use crate::renderer::FallbackResources;
 use crate::{
     core::{algebra::Vector2, math::Rect, sstorage::ImmutableString},
     renderer::{
-        cache::uniform::UniformBufferCache,
+        cache::{
+            shader::{binding, property, PropertyGroup, RenderMaterial, RenderPassContainer},
+            uniform::UniformBufferCache,
+        },
         framework::{
             error::FrameworkError,
-            framebuffer::{
-                Attachment, AttachmentKind, BufferLocation, FrameBuffer, ResourceBindGroup,
-                ResourceBinding,
-            },
-            geometry_buffer::GeometryBuffer,
-            gpu_program::{GpuProgram, UniformLocation},
+            framebuffer::{Attachment, AttachmentKind, GpuFrameBuffer},
+            geometry_buffer::GpuGeometryBuffer,
             gpu_texture::{GpuTexture, PixelKind},
             server::GraphicsServer,
-            uniform::StaticUniformBuffer,
-            DrawParameters, ElementRange,
         },
         make_viewport_matrix, RenderPassStatistics,
     },
 };
-use std::{cell::RefCell, rc::Rc};
-
-struct Shader {
-    program: Box<dyn GpuProgram>,
-    image: UniformLocation,
-    uniform_block_binding: usize,
-}
-
-impl Shader {
-    fn new(server: &dyn GraphicsServer) -> Result<Self, FrameworkError> {
-        let fragment_source = include_str!("../shaders/gaussian_blur_fs.glsl");
-        let vertex_source = include_str!("../shaders/gaussian_blur_vs.glsl");
-
-        let program =
-            server.create_program("GaussianBlurShader", vertex_source, fragment_source)?;
-        Ok(Self {
-            image: program.uniform_location(&ImmutableString::new("image"))?,
-            uniform_block_binding: program
-                .uniform_block_index(&ImmutableString::new("Uniforms"))?,
-            program,
-        })
-    }
-}
 
 pub struct GaussianBlur {
-    shader: Shader,
-    h_framebuffer: Box<dyn FrameBuffer>,
-    v_framebuffer: Box<dyn FrameBuffer>,
+    shader: RenderPassContainer,
+    h_framebuffer: GpuFrameBuffer,
+    v_framebuffer: GpuFrameBuffer,
     width: usize,
     height: usize,
 }
@@ -75,7 +50,7 @@ fn create_framebuffer(
     width: usize,
     height: usize,
     pixel_kind: PixelKind,
-) -> Result<Box<dyn FrameBuffer>, FrameworkError> {
+) -> Result<GpuFrameBuffer, FrameworkError> {
     let frame = server.create_2d_render_target(pixel_kind, width, height)?;
 
     server.create_frame_buffer(
@@ -95,7 +70,10 @@ impl GaussianBlur {
         pixel_kind: PixelKind,
     ) -> Result<Self, FrameworkError> {
         Ok(Self {
-            shader: Shader::new(server)?,
+            shader: RenderPassContainer::from_str(
+                server,
+                include_str!("../shaders/gaussian_blur.shader"),
+            )?,
             h_framebuffer: create_framebuffer(server, width, height, pixel_kind)?,
             v_framebuffer: create_framebuffer(server, width, height, pixel_kind)?,
             width,
@@ -103,97 +81,53 @@ impl GaussianBlur {
         })
     }
 
-    fn h_blurred(&self) -> Rc<RefCell<dyn GpuTexture>> {
-        self.h_framebuffer.color_attachments()[0].texture.clone()
+    fn h_blurred(&self) -> &GpuTexture {
+        &self.h_framebuffer.color_attachments()[0].texture
     }
 
-    pub fn result(&self) -> Rc<RefCell<dyn GpuTexture>> {
-        self.v_framebuffer.color_attachments()[0].texture.clone()
+    pub fn result(&self) -> &GpuTexture {
+        &self.v_framebuffer.color_attachments()[0].texture
     }
 
     pub(crate) fn render(
-        &mut self,
-        quad: &dyn GeometryBuffer,
-        input: Rc<RefCell<dyn GpuTexture>>,
+        &self,
+        quad: &GpuGeometryBuffer,
+        input: &GpuTexture,
         uniform_buffer_cache: &mut UniformBufferCache,
+        fallback_resources: &FallbackResources,
     ) -> Result<RenderPassStatistics, FrameworkError> {
         let mut stats = RenderPassStatistics::default();
 
         let viewport = Rect::new(0, 0, self.width as i32, self.height as i32);
-
         let inv_size = Vector2::new(1.0 / self.width as f32, 1.0 / self.height as f32);
-        let shader = &self.shader;
+        let wvp = make_viewport_matrix(viewport);
 
-        // Blur horizontally first.
-        stats += self.h_framebuffer.draw(
-            quad,
-            viewport,
-            &*shader.program,
-            &DrawParameters {
-                cull_face: None,
-                color_write: Default::default(),
-                depth_write: false,
-                stencil_test: None,
-                depth_test: None,
-                blend: None,
-                stencil_op: Default::default(),
-                scissor_box: None,
-            },
-            &[ResourceBindGroup {
-                bindings: &[
-                    ResourceBinding::texture(&input, &shader.image),
-                    ResourceBinding::Buffer {
-                        buffer: uniform_buffer_cache.write(
-                            StaticUniformBuffer::<256>::new()
-                                .with(&make_viewport_matrix(viewport))
-                                .with(&inv_size)
-                                .with(&true),
-                        )?,
-                        binding: BufferLocation::Auto {
-                            shader_location: shader.uniform_block_binding,
-                        },
-                        data_usage: Default::default(),
-                    },
-                ],
-            }],
-            ElementRange::Full,
-        )?;
+        for (image, framebuffer, horizontal) in [
+            (input, &self.h_framebuffer, true),
+            (self.h_blurred(), &self.v_framebuffer, false),
+        ] {
+            let properties = PropertyGroup::from([
+                property("worldViewProjection", &wvp),
+                property("pixelSize", &inv_size),
+                property("horizontal", &horizontal),
+            ]);
+            let material = RenderMaterial::from([
+                binding("image", (image, &fallback_resources.nearest_clamp_sampler)),
+                binding("properties", &properties),
+            ]);
 
-        // Then blur vertically.
-        let h_blurred_texture = self.h_blurred();
-        stats += self.v_framebuffer.draw(
-            quad,
-            viewport,
-            &*shader.program,
-            &DrawParameters {
-                cull_face: None,
-                color_write: Default::default(),
-                depth_write: false,
-                stencil_test: None,
-                depth_test: None,
-                blend: None,
-                stencil_op: Default::default(),
-                scissor_box: None,
-            },
-            &[ResourceBindGroup {
-                bindings: &[
-                    ResourceBinding::texture(&h_blurred_texture, &shader.image),
-                    ResourceBinding::Buffer {
-                        buffer: uniform_buffer_cache.write(
-                            StaticUniformBuffer::<256>::new()
-                                .with(&make_viewport_matrix(viewport))
-                                .with(&inv_size)
-                                .with(&false),
-                        )?,
-                        binding: BufferLocation::Auto {
-                            shader_location: shader.uniform_block_binding,
-                        },
-                        data_usage: Default::default(),
-                    },
-                ],
-            }],
-            ElementRange::Full,
-        )?;
+            stats += self.shader.run_pass(
+                1,
+                &ImmutableString::new("Primary"),
+                framebuffer,
+                quad,
+                viewport,
+                &material,
+                uniform_buffer_cache,
+                Default::default(),
+                None,
+            )?;
+        }
 
         Ok(stats)
     }

@@ -32,7 +32,11 @@ use crate::{
     widget::WidgetBuilder,
     Brush, BuildContext, HorizontalAlignment, RcUiNodeHandle, Thickness, UiNode, VerticalAlignment,
 };
-use fyrox_texture::TextureResource;
+use fyrox_core::Uuid;
+use fyrox_texture::{
+    CompressionOptions, TextureImportOptions, TextureMinificationFilter, TextureResource,
+    TextureResourceExtension,
+};
 use std::sync::Arc;
 
 pub enum ArrowDirection {
@@ -323,4 +327,17 @@ pub fn make_text_and_image_button_with_tooltip(
         .build(ctx),
     )
     .build(ctx)
+}
+
+pub fn load_image(data: &[u8]) -> Option<TextureResource> {
+    TextureResource::load_from_memory(
+        Uuid::new_v4(),
+        Default::default(),
+        data,
+        TextureImportOptions::default()
+            .with_compression(CompressionOptions::NoCompression)
+            .with_minification_filter(TextureMinificationFilter::LinearMipMapLinear)
+            .with_lod_bias(-1.0),
+    )
+    .ok()
 }

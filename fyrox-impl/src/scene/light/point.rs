@@ -64,6 +64,7 @@ use std::ops::{Deref, DerefMut};
 
 /// See module docs.
 #[derive(Debug, Reflect, Clone, Visit, ComponentProvider)]
+#[reflect(derived_type = "Node")]
 pub struct PointLight {
     #[component(include)]
     base_light: BaseLight,

@@ -43,6 +43,7 @@ use crate::fyrox::{
         BuildContext, Control, HorizontalAlignment, Orientation, Thickness, UiNode, UserInterface,
     },
 };
+
 use fyrox::gui::style::resource::StyleResourceExt;
 use fyrox::gui::style::Style;
 use std::{
@@ -136,7 +137,7 @@ impl PropertyDescriptor {
             allowed_types,
         );
 
-        if !items.is_empty() || allowed_types.map_or(true, |types| types.contains(&self.type_id)) {
+        if !items.is_empty() || allowed_types.is_none_or(|types| types.contains(&self.type_id)) {
             let name = format!(
                 "{} ({})",
                 self.display_name,
@@ -169,17 +170,17 @@ pub fn object_to_property_tree<F>(
     filter: &mut F,
 ) -> Vec<PropertyDescriptor>
 where
-    F: FnMut(&FieldInfo) -> bool,
+    F: FnMut(&FieldRef) -> bool,
 {
     let mut descriptors = Vec::new();
 
-    object.fields_info(&mut |fields_info| {
-        for field_info in fields_info.iter() {
+    object.fields_ref(&mut |fields_ref| {
+        for field_info in fields_ref.iter() {
             if !filter(field_info) {
                 continue;
             }
 
-            let field_ref = field_info.reflect_value;
+            let field_ref = field_info.value.field_value_as_reflect();
 
             let path = if parent_path.is_empty() {
                 field_info.name.to_owned()
@@ -194,7 +195,7 @@ where
                     let mut descriptor = PropertyDescriptor {
                         path: path.clone(),
                         display_name: field_info.display_name.to_owned(),
-                        type_name: field_info.type_name.to_owned(),
+                        type_name: field_info.value.type_name().to_owned(),
                         type_id: field_info.value.type_id(),
                         children_properties: Default::default(),
                         read_only: field_info.read_only,
@@ -226,7 +227,7 @@ where
                         let mut descriptor = PropertyDescriptor {
                             path: path.clone(),
                             display_name: field_info.display_name.to_owned(),
-                            type_name: field_info.type_name.to_owned(),
+                            type_name: field_info.value.type_name().to_owned(),
                             type_id: field_info.value.type_id(),
                             children_properties: Default::default(),
                             read_only: field_info.read_only,
@@ -282,7 +283,7 @@ where
             if !processed {
                 descriptors.push(PropertyDescriptor {
                     display_name: field_info.display_name.to_owned(),
-                    type_name: field_info.type_name.to_owned(),
+                    type_name: field_info.value.type_name().to_owned(),
                     type_id: field_info.value.type_id(),
                     read_only: field_info.read_only,
                     children_properties: object_to_property_tree(&path, field_ref, filter),
@@ -296,6 +297,7 @@ where
 }
 
 #[derive(Clone, Visit, Reflect, Debug, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct PropertySelector {
     widget: Widget,
     #[reflect(hidden)]
@@ -499,6 +501,7 @@ impl PropertySelectorBuilder {
 }
 
 #[derive(Clone, Visit, Reflect, Debug, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct PropertySelectorWindow {
     #[component(include)]
     window: Window,
@@ -584,7 +587,7 @@ impl Control for PropertySelectorWindow {
                 let enabled = selection.iter().all(|d| {
                     self.allowed_types
                         .as_ref()
-                        .map_or(true, |types| types.contains(&d.type_id))
+                        .is_none_or(|types| types.contains(&d.type_id))
                 });
 
                 ui.send_message(WidgetMessage::enabled(

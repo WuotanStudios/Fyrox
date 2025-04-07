@@ -27,6 +27,8 @@ mod upgrade;
 mod utils;
 
 use crate::{manager::ProjectManager, settings::DATA_DIR, utils::make_button};
+use fyrox::core::Uuid;
+use fyrox::engine::ApplicationLoopController;
 use fyrox::{
     asset::{manager::ResourceManager, untyped::ResourceKind},
     core::{
@@ -92,6 +94,7 @@ fn main() {
     let primary_ui = engine.user_interfaces.first_mut();
 
     primary_ui.default_font = FontResource::new_ok(
+        Uuid::new_v4(),
         ResourceKind::Embedded,
         Font::from_memory(
             include_bytes!("../resources/Roboto-Regular.ttf").to_vec(),
@@ -161,7 +164,12 @@ fn main() {
                                 .request_update_in_next_frame();
                         }
 
-                        engine.update(time_step, window_target, &mut 0.0, Default::default());
+                        engine.update(
+                            time_step,
+                            ApplicationLoopController::WindowTarget(window_target),
+                            &mut 0.0,
+                            Default::default(),
+                        );
 
                         project_manager.update(engine.user_interfaces.first_mut(), time_step);
 

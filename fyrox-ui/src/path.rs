@@ -36,6 +36,7 @@ use crate::{
     window::{WindowBuilder, WindowMessage, WindowTitle},
     BuildContext, Control, Thickness, UiNode, UserInterface,
 };
+
 use fyrox_core::uuid_provider;
 use fyrox_core::variable::InheritableVariable;
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
@@ -82,6 +83,7 @@ impl PathEditorMessage {
 /// To receive the changes, listen to [`PathEditorMessage::Path`] and check for its direction, it should be [`MessageDirection::FromWidget`].
 /// To set a new path value, send [`PathEditorMessage::Path`] message, but with [`MessageDirection::ToWidget`].
 #[derive(Default, Clone, Visit, Reflect, Debug, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct PathEditor {
     /// Base widget of the editor.
     pub widget: Widget,

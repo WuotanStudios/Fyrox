@@ -21,11 +21,10 @@
 use crate::gl::server::GlGraphicsServer;
 use crate::gl::ToGlConstant;
 use crate::{
-    buffer::{Buffer, BufferKind, BufferUsage},
+    buffer::{BufferKind, BufferUsage, GpuBufferTrait},
     error::FrameworkError,
 };
 use glow::HasContext;
-use std::any::Any;
 use std::{cell::Cell, rc::Weak};
 
 impl ToGlConstant for BufferKind {
@@ -103,15 +102,7 @@ impl Drop for GlBuffer {
     }
 }
 
-impl Buffer for GlBuffer {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-
+impl GpuBufferTrait for GlBuffer {
     fn usage(&self) -> BufferUsage {
         self.usage
     }

@@ -55,6 +55,9 @@ pub struct TypeArgs {
 
     #[darling(default, rename = "ReflectList")]
     pub impl_as_list: bool,
+
+    #[darling(multiple)]
+    pub derived_type: Vec<Path>,
 }
 
 impl TypeArgs {
@@ -187,6 +190,13 @@ pub struct FieldArgs {
     /// A human-readable name.
     #[darling(default)]
     pub display_name: Option<String>,
+
+    /// #[reflect(tag = "<tag>")]
+    ///
+    /// Tag of the property. Could be used to group properties by a certain criteria or to find a
+    /// specific property by its tag.
+    #[darling(default)]
+    pub tag: Option<String>,
 
     /// `#[reflect(read_only)]`
     ///

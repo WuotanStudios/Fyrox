@@ -18,21 +18,28 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::gpu_texture::GpuTextureDescriptor;
 use crate::{
-    buffer::{Buffer, BufferKind, BufferUsage},
+    buffer::{BufferKind, BufferUsage, GpuBuffer},
     core::{color::Color, log::Log, math::Rect},
     error::FrameworkError,
-    framebuffer::{Attachment, FrameBuffer},
-    geometry_buffer::{GeometryBuffer, GeometryBufferDescriptor},
+    framebuffer::{Attachment, GpuFrameBuffer},
+    geometry_buffer::{GeometryBufferDescriptor, GpuGeometryBuffer},
     gl::{
-        self, framebuffer::GlFrameBuffer, geometry_buffer::GlGeometryBuffer, program::GlProgram,
-        query::GlQuery, read_buffer::GlAsyncReadBuffer, texture::GlTexture, ToGlConstant,
+        self,
+        framebuffer::GlFrameBuffer,
+        geometry_buffer::GlGeometryBuffer,
+        program::{GlProgram, GlShader},
+        query::GlQuery,
+        read_buffer::GlAsyncReadBuffer,
+        sampler::GlSampler,
+        texture::GlTexture,
+        ToGlConstant,
     },
-    gpu_program::{GpuProgram, ShaderResourceDefinition},
-    gpu_texture::GpuTexture,
-    query::Query,
-    read_buffer::AsyncReadBuffer,
+    gpu_program::{GpuProgram, GpuShader, ShaderKind, ShaderResourceDefinition},
+    gpu_texture::{GpuTexture, GpuTextureDescriptor},
+    query::GpuQuery,
+    read_buffer::GpuAsyncReadBuffer,
+    sampler::{GpuSampler, GpuSamplerDescriptor},
     server::{GraphicsServer, ServerCapabilities, SharedGraphicsServer},
     stats::PipelineStatistics,
     BlendEquation, BlendFactor, BlendFunc, BlendMode, ColorMask, CompareFunc, CullFace,
@@ -54,7 +61,6 @@ use glutin::{
 use glutin_winit::{DisplayBuilder, GlWindow};
 #[cfg(not(target_arch = "wasm32"))]
 use raw_window_handle::HasRawWindowHandle;
-use std::any::Any;
 use std::cell::RefCell;
 use std::ops::DerefMut;
 use std::rc::{Rc, Weak};
@@ -994,97 +1000,100 @@ impl GraphicsServer for GlGraphicsServer {
         size: usize,
         buffer_kind: BufferKind,
         buffer_usage: BufferUsage,
-    ) -> Result<Box<dyn Buffer>, FrameworkError> {
-        Ok(Box::new(gl::buffer::GlBuffer::new(
+    ) -> Result<GpuBuffer, FrameworkError> {
+        Ok(GpuBuffer(Rc::new(gl::buffer::GlBuffer::new(
             self,
             size,
             buffer_kind,
             buffer_usage,
-        )?))
+        )?)))
     }
 
-    fn create_texture(
-        &self,
-        desc: GpuTextureDescriptor,
-    ) -> Result<Rc<RefCell<dyn GpuTexture>>, FrameworkError> {
-        Ok(Rc::new(RefCell::new(GlTexture::new(self, desc)?)))
+    fn create_texture(&self, desc: GpuTextureDescriptor) -> Result<GpuTexture, FrameworkError> {
+        Ok(GpuTexture(Rc::new(GlTexture::new(self, desc)?)))
+    }
+
+    fn create_sampler(&self, desc: GpuSamplerDescriptor) -> Result<GpuSampler, FrameworkError> {
+        Ok(GpuSampler(Rc::new(GlSampler::new(self, desc)?)))
     }
 
     fn create_frame_buffer(
         &self,
         depth_attachment: Option<Attachment>,
         color_attachments: Vec<Attachment>,
-    ) -> Result<Box<dyn FrameBuffer>, FrameworkError> {
-        Ok(Box::new(GlFrameBuffer::new(
+    ) -> Result<GpuFrameBuffer, FrameworkError> {
+        Ok(GpuFrameBuffer(Rc::new(GlFrameBuffer::new(
             self,
             depth_attachment,
             color_attachments,
-        )?))
+        )?)))
     }
 
-    fn back_buffer(&self) -> Box<dyn FrameBuffer> {
-        Box::new(GlFrameBuffer::backbuffer(self))
+    fn back_buffer(&self) -> GpuFrameBuffer {
+        GpuFrameBuffer(Rc::new(GlFrameBuffer::backbuffer(self)))
     }
 
-    fn create_query(&self) -> Result<Box<dyn Query>, FrameworkError> {
-        Ok(Box::new(GlQuery::new(self)?))
+    fn create_query(&self) -> Result<GpuQuery, FrameworkError> {
+        Ok(GpuQuery(Rc::new(GlQuery::new(self)?)))
+    }
+
+    fn create_shader(
+        &self,
+        name: String,
+        kind: ShaderKind,
+        source: String,
+        resources: &[ShaderResourceDefinition],
+        line_offset: isize,
+    ) -> Result<GpuShader, FrameworkError> {
+        Ok(GpuShader(Rc::new(GlShader::new(
+            self,
+            name,
+            kind,
+            source,
+            resources,
+            line_offset,
+        )?)))
     }
 
     fn create_program(
         &self,
         name: &str,
-        vertex_source: &str,
-        fragment_source: &str,
-    ) -> Result<Box<dyn GpuProgram>, FrameworkError> {
-        Ok(Box::new(GlProgram::from_source(
+        vertex_source: String,
+        vertex_source_line_offset: isize,
+        fragment_source: String,
+        fragment_source_line_offset: isize,
+        resources: &[ShaderResourceDefinition],
+    ) -> Result<GpuProgram, FrameworkError> {
+        Ok(GpuProgram(Rc::new(GlProgram::from_source_and_resources(
             self,
             name,
             vertex_source,
+            vertex_source_line_offset,
             fragment_source,
-        )?))
-    }
-
-    fn create_program_with_properties(
-        &self,
-        name: &str,
-        vertex_source: &str,
-        fragment_source: &str,
-        properties: &[ShaderResourceDefinition],
-    ) -> Result<Box<dyn GpuProgram>, FrameworkError> {
-        Ok(Box::new(GlProgram::from_source_and_properties(
-            self,
-            name,
-            vertex_source,
-            fragment_source,
-            properties,
-        )?))
+            fragment_source_line_offset,
+            resources,
+        )?)))
     }
 
     fn create_async_read_buffer(
         &self,
         pixel_size: usize,
         pixel_count: usize,
-    ) -> Result<Box<dyn AsyncReadBuffer>, FrameworkError> {
-        Ok(Box::new(GlAsyncReadBuffer::new(
+    ) -> Result<GpuAsyncReadBuffer, FrameworkError> {
+        Ok(GpuAsyncReadBuffer(Rc::new(GlAsyncReadBuffer::new(
             self,
             pixel_size,
             pixel_count,
-        )?))
+        )?)))
     }
 
     fn create_geometry_buffer(
         &self,
         desc: GeometryBufferDescriptor,
-    ) -> Result<Box<dyn GeometryBuffer>, FrameworkError> {
-        Ok(Box::new(GlGeometryBuffer::new(self, desc)?))
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
+    ) -> Result<GpuGeometryBuffer, FrameworkError> {
+        Ok(GpuGeometryBuffer(Rc::new(GlGeometryBuffer::new(
+            self, desc,
+        )?)))
     }
 
     fn weak(self: Rc<Self>) -> Weak<dyn GraphicsServer> {

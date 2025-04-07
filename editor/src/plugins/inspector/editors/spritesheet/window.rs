@@ -44,6 +44,7 @@ use crate::fyrox::{
     scene::animation::spritesheet::prelude::*,
 };
 use crate::plugins::inspector::editors::spritesheet::SpriteSheetFramesPropertyEditorMessage;
+
 use fyrox::gui::style::resource::StyleResourceExt;
 use fyrox::gui::style::Style;
 use std::{
@@ -52,6 +53,7 @@ use std::{
 };
 
 #[derive(Clone, Visit, Reflect, Debug, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct SpriteSheetFramesEditorWindow {
     #[component(include)]
     window: Window,
@@ -319,7 +321,7 @@ impl SpriteSheetFramesEditorWindow {
                 .on_row(0)
                 .on_column(0),
         )
-        .with_opt_texture(container.texture().map(Into::into))
+        .with_opt_texture(container.texture())
         .build(ctx);
 
         let buttons_container = StackPanelBuilder::new(
@@ -374,7 +376,7 @@ impl SpriteSheetFramesEditorWindow {
                                             WidgetBuilder::new()
                                                 .with_margin(Thickness::uniform(1.0)),
                                         )
-                                        .with_opt_texture(container.texture().map(Into::into))
+                                        .with_opt_texture(container.texture())
                                         .build(ctx),
                                     )
                                     .with_child(grid),
@@ -407,6 +409,7 @@ impl SpriteSheetFramesEditorWindow {
             .open(false)
             .can_minimize(false)
             .with_title(WindowTitle::text("Sprite Sheet Frames Editor"))
+            .with_tab_label("Sprite Sheet Frames")
             .build_window(ctx),
             animation: SpriteSheetAnimation::with_container(container),
             editor,

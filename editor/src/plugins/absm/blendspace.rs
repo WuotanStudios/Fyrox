@@ -57,6 +57,7 @@ use crate::plugins::absm::{
     selection::{AbsmSelection, SelectedEntity},
 };
 use crate::{menu::create_menu_item, message::MessageSender, send_sync_message};
+
 use fyrox::gui::menu::ContextMenuBuilder;
 use fyrox::gui::style::resource::StyleResourceExt;
 use fyrox::gui::style::Style;
@@ -112,6 +113,7 @@ enum DragContext {
 }
 
 #[derive(Clone, Visit, Reflect, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 struct BlendSpaceField {
     widget: Widget,
     points: Vec<Handle<UiNode>>,
@@ -562,6 +564,7 @@ impl BlendSpaceFieldPointMessage {
 }
 
 #[derive(Clone, Visit, Reflect, Debug, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 struct BlendSpaceFieldPoint {
     widget: Widget,
     selected: bool,
@@ -790,6 +793,7 @@ impl BlendSpaceEditor {
             .open(false)
             .with_content(content)
             .with_title(WindowTitle::text("Blend Space Editor"))
+            .with_tab_label("Blend Space")
             .build(ctx);
 
         Self {

@@ -217,11 +217,12 @@ impl Visit for ParticleSystemRng {
 ///     )
 ///     .with_radius(0.01)
 ///     .build()])
-///     .with_material(MaterialResource::new_ok(Default::default(), material))
+///     .with_material(MaterialResource::new_embedded(material))
 ///     .build(graph);
 /// }
 /// ```
 #[derive(Debug, Clone, Reflect, ComponentProvider)]
+#[reflect(derived_type = "Node")]
 pub struct ParticleSystem {
     base: Base,
 
@@ -638,6 +639,7 @@ impl NodeTrait for ParticleSystem {
         let sort_index = ctx.calculate_sorting_index(self.global_position());
 
         ctx.storage.push_triangles(
+            ctx.dynamic_surface_cache,
             Vertex::layout(),
             &self.material,
             RenderPath::Forward,
@@ -742,6 +744,7 @@ impl ParticleSystemBuilder {
             base_builder,
             emitters: Default::default(),
             material: MaterialResource::new_ok(
+                Uuid::new_v4(),
                 Default::default(),
                 Material::standard_particle_system(),
             ),

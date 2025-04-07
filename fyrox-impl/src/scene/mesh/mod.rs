@@ -24,6 +24,7 @@
 use crate::material::{
     Material, MaterialResourceBinding, MaterialResourceExtension, MaterialTextureBinding,
 };
+use crate::renderer::DynamicSurfaceCache;
 use crate::resource::texture::PLACEHOLDER;
 use crate::scene::mesh::surface::SurfaceBuilder;
 use crate::scene::node::constructor::NodeConstructor;
@@ -52,7 +53,7 @@ use crate::{
         graph::Graph,
         mesh::{
             buffer::{
-                BytesStorage, TriangleBuffer, TriangleBufferRefMut, VertexAttributeDescriptor,
+                TriangleBuffer, TriangleBufferRefMut, VertexAttributeDescriptor,
                 VertexAttributeUsage, VertexBuffer, VertexBufferRefMut, VertexReadTrait,
                 VertexViewMut, VertexWriteTrait,
             },
@@ -177,11 +178,13 @@ impl BatchContainer {
             }
 
             descendant.collect_render_data(&mut RenderContext {
+                elapsed_time: ctx.elapsed_time,
                 observer_info: ctx.observer_info,
                 frustum: None,
                 storage: self,
                 graph: ctx.graph,
                 render_pass_name: ctx.render_pass_name,
+                dynamic_surface_cache: ctx.dynamic_surface_cache,
             });
         }
     }
@@ -199,6 +202,7 @@ impl Clone for BatchContainerWrapper {
 impl RenderDataBundleStorageTrait for BatchContainer {
     fn push_triangles(
         &mut self,
+        dynamic_surface_cache: &mut DynamicSurfaceCache,
         layout: &[VertexAttributeDescriptor],
         material: &MaterialResource,
         _render_path: RenderPath,
@@ -212,14 +216,7 @@ impl RenderDataBundleStorageTrait for BatchContainer {
         let batch_hash = hasher.finish();
 
         let batch = self.batches.entry(batch_hash).or_insert_with(|| Batch {
-            data: SurfaceResource::new_ok(
-                ResourceKind::Embedded,
-                SurfaceData::new(
-                    VertexBuffer::new_with_layout(layout, 0, BytesStorage::with_capacity(4096))
-                        .unwrap(),
-                    TriangleBuffer::new(Vec::with_capacity(4096)),
-                ),
-            ),
+            data: dynamic_surface_cache.get_or_create(batch_hash, layout),
             material: material.clone(),
         });
 
@@ -249,6 +246,7 @@ impl RenderDataBundleStorageTrait for BatchContainer {
 
         let batch = self.batches.entry(batch_hash).or_insert_with(|| Batch {
             data: SurfaceResource::new_ok(
+                Uuid::new_v4(),
                 ResourceKind::Embedded,
                 SurfaceData::new(
                     src_data.vertex_buffer.clone_empty(4096),
@@ -306,7 +304,7 @@ impl RenderDataBundleStorageTrait for BatchContainer {
 /// fn create_cube_mesh(graph: &mut Graph) -> Handle<Node> {
 ///     let cube_surface_data = SurfaceData::make_cube(Matrix4::identity());
 ///
-///     let cube_surface = SurfaceBuilder::new(SurfaceResource::new_ok(ResourceKind::Embedded, cube_surface_data)).build();
+///     let cube_surface = SurfaceBuilder::new(SurfaceResource::new_embedded(cube_surface_data)).build();
 ///
 ///     MeshBuilder::new(BaseBuilder::new())
 ///         .with_surfaces(vec![cube_surface])
@@ -317,6 +315,7 @@ impl RenderDataBundleStorageTrait for BatchContainer {
 /// This example creates a unit cube surface with default material and then creates a mesh with this surface. If you need to create
 /// custom surface, see [`crate::scene::mesh::surface::SurfaceData`] docs for more info.
 #[derive(Debug, Reflect, Clone, Visit, ComponentProvider)]
+#[reflect(derived_type = "Node")]
 pub struct Mesh {
     #[visit(rename = "Common")]
     base: Base,
@@ -548,7 +547,7 @@ fn extend_aabb_from_vertex_buffer(
 fn placeholder_material() -> MaterialResource {
     let mut material = Material::standard();
     material.bind("diffuseTexture", PLACEHOLDER.resource());
-    MaterialResource::new_ok(ResourceKind::Embedded, material)
+    MaterialResource::new_ok(Uuid::new_v4(), ResourceKind::Embedded, material)
 }
 
 impl ConstructorProvider<Node, Graph> for Mesh {
@@ -642,13 +641,11 @@ impl NodeTrait for Mesh {
 
     fn on_global_transform_changed(
         &self,
-        _new_global_transform: &Matrix4<f32>,
+        new_global_transform: &Matrix4<f32>,
         context: &mut SyncContext,
     ) {
         if self.surfaces.iter().any(|s| !s.bones.is_empty()) {
-            let mut world_aabb = self
-                .local_bounding_box()
-                .transform(&self.global_transform());
+            let mut world_aabb = self.local_bounding_box().transform(new_global_transform);
 
             // Special case for skinned meshes.
             for surface in self.surfaces.iter() {
@@ -661,10 +658,8 @@ impl NodeTrait for Mesh {
 
             self.world_bounding_box.set(world_aabb)
         } else {
-            self.world_bounding_box.set(
-                self.local_bounding_box()
-                    .transform(&self.global_transform()),
-            );
+            self.world_bounding_box
+                .set(self.local_bounding_box().transform(new_global_transform));
         }
     }
 
@@ -779,6 +774,7 @@ impl NodeTrait for Mesh {
                         let surface_data_guard = surface.data_ref().data_ref();
 
                         ctx.storage.push_triangles(
+                            ctx.dynamic_surface_cache,
                             &surface_data_guard
                                 .vertex_buffer
                                 .layout_descriptor()

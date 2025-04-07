@@ -26,8 +26,9 @@ use crate::{
         ComponentProvider, NameProvider,
     },
     widget::Widget,
-    BaseControl, Control, UserInterface,
+    Control, ControlAsAny, UserInterface,
 };
+
 use fyrox_graph::SceneGraphNode;
 use fyrox_resource::{untyped::UntypedResource, Resource};
 use std::{
@@ -165,6 +166,7 @@ impl UiNode {
     /// # use fyrox_core::uuid_provider;
     /// #
     /// #[derive(Clone, Visit, Reflect, Debug, ComponentProvider)]
+    /// #[reflect(derived_type = "UiNode")]
     /// struct MyWidget {
     ///     widget: Widget,
     /// }
@@ -209,7 +211,7 @@ impl UiNode {
     where
         T: Control,
     {
-        BaseControl::as_any(&*self.0).downcast_ref::<T>()
+        ControlAsAny::as_any(&*self.0).downcast_ref::<T>()
     }
 
     /// Tries to perform **direct** downcasting to a particular widget type. It is just a simple wrapper
@@ -218,7 +220,7 @@ impl UiNode {
     where
         T: Control,
     {
-        BaseControl::as_any_mut(&mut *self.0).downcast_mut::<T>()
+        ControlAsAny::as_any_mut(&mut *self.0).downcast_mut::<T>()
     }
 
     /// Tries to fetch a component of the given type `T`. At very basis it mimics [`Self::cast`] behaviour, but
@@ -281,6 +283,14 @@ impl Reflect for UiNode {
         file!()
     }
 
+    fn derived_types() -> &'static [TypeId] {
+        &[]
+    }
+
+    fn query_derived_types(&self) -> &'static [TypeId] {
+        Self::derived_types()
+    }
+
     fn type_name(&self) -> &'static str {
         Reflect::type_name(self.0.deref())
     }
@@ -297,12 +307,16 @@ impl Reflect for UiNode {
         env!("CARGO_PKG_NAME")
     }
 
-    fn fields_info(&self, func: &mut dyn FnMut(&[FieldInfo])) {
-        self.0.deref().fields_info(func)
+    fn fields_ref(&self, func: &mut dyn FnMut(&[FieldRef])) {
+        self.0.deref().fields_ref(func)
+    }
+
+    fn fields_mut(&mut self, func: &mut dyn FnMut(&mut [FieldMut])) {
+        self.0.deref_mut().fields_mut(func)
     }
 
     fn into_any(self: Box<Self>) -> Box<dyn Any> {
-        self.0.into_any()
+        Reflect::into_any(self.0)
     }
 
     fn as_any(&self, func: &mut dyn FnMut(&dyn Any)) {
@@ -332,14 +346,6 @@ impl Reflect for UiNode {
         func: &mut dyn FnMut(Result<Box<dyn Reflect>, Box<dyn Reflect>>),
     ) {
         self.0.deref_mut().set_field(field, value, func)
-    }
-
-    fn fields(&self, func: &mut dyn FnMut(&[&dyn Reflect])) {
-        self.0.deref().fields(func)
-    }
-
-    fn fields_mut(&mut self, func: &mut dyn FnMut(&mut [&mut dyn Reflect])) {
-        self.0.deref_mut().fields_mut(func)
     }
 
     fn field(&self, name: &str, func: &mut dyn FnMut(Option<&dyn Reflect>)) {

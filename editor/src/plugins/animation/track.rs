@@ -90,6 +90,7 @@ use crate::{
     },
     send_sync_message, utils,
 };
+
 use fyrox::generic_animation::track::TrackBinding;
 use fyrox::gui::style::resource::StyleResourceExt;
 use fyrox::gui::style::Style;
@@ -281,6 +282,7 @@ impl TrackViewMessage {
 }
 
 #[derive(Clone, Debug, Reflect, Visit, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 struct TrackView {
     #[component(include)]
     tree: Tree,
@@ -869,12 +871,12 @@ impl TrackList {
         } else if let Some(NodeSelectorMessage::Selection(node_selection)) = message.data() {
             if message.destination() == self.node_selector {
                 if let Some(first) = node_selection.first() {
-                    self.selected_node = *first;
+                    self.selected_node = first.handle;
 
                     match self.property_binding_mode {
                         PropertyBindingMode::Generic => {
                             self.property_selector =
-                                Self::open_property_selector(graph, (*first).into(), None, ui);
+                                Self::open_property_selector(graph, first.handle.into(), None, ui);
                         }
                         PropertyBindingMode::Position => {
                             sender.do_command(AddTrackCommand::new(
@@ -912,7 +914,7 @@ impl TrackList {
                                 animation_player_handle: selection.animation_player,
                                 animation_handle: selection.animation,
                                 track: *id,
-                                target: (*first).into(),
+                                target: first.handle.into(),
                             }));
                         }
                     }
@@ -1108,8 +1110,8 @@ impl TrackList {
         let mut descriptors = Vec::new();
         if let Some(node) = graph.try_get(node) {
             node.as_reflect(&mut |node| {
-                descriptors = object_to_property_tree("", node, &mut |field: &FieldInfo| {
-                    let type_id = field.reflect_value.type_id();
+                descriptors = object_to_property_tree("", node, &mut |field: &FieldRef| {
+                    let type_id = field.value.field_value_as_reflect().type_id();
                     type_id != TypeId::of::<TextureBytes>()
                         // Vertex buffer cannot be animated (mainly because it contains untyped data).
                         && type_id != TypeId::of::<VertexBuffer>()

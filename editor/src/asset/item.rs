@@ -18,6 +18,8 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+use fyrox::core::log::Log;
+
 use crate::{
     asset::open_in_explorer,
     fyrox::{
@@ -41,11 +43,12 @@ use crate::{
             UserInterface,
         },
         material::Material,
-        scene::tilemap::tileset::TileSet,
+        scene::tilemap::{brush::TileMapBrush, tileset::TileSet},
     },
     message::MessageSender,
     Message,
 };
+
 use fyrox::resource::texture::TextureResource;
 use std::{
     ops::{Deref, DerefMut},
@@ -68,6 +71,7 @@ impl AssetItemMessage {
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Visit, Reflect, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct AssetItem {
     widget: Widget,
     pub path: PathBuf,
@@ -134,19 +138,31 @@ impl AssetItem {
         if self
             .path
             .extension()
-            .map_or(false, |ext| ext == "rgs" || ext == "ui")
+            .is_some_and(|ext| ext == "rgs" || ext == "ui")
         {
             sender.send(Message::LoadScene(self.path.clone()));
-        } else if self.path.extension().map_or(false, |ext| ext == "material") {
+        } else if self.path.extension().is_some_and(|ext| ext == "material") {
             if let Ok(path) = make_relative_path(&self.path) {
                 if let Ok(material) = block_on(resource_manager.request::<Material>(path)) {
                     sender.send(Message::OpenMaterialEditor(material));
                 }
             }
-        } else if self.path.extension().map_or(false, |ext| ext == "tileset") {
+        } else if self.path.extension().is_some_and(|ext| ext == "tileset") {
             if let Ok(path) = make_relative_path(&self.path) {
-                if let Ok(tile_set) = block_on(resource_manager.request::<TileSet>(path)) {
-                    sender.send(Message::OpenTileSetEditor(tile_set));
+                match block_on(resource_manager.request::<TileSet>(path)) {
+                    Ok(tile_set) => sender.send(Message::OpenTileSetEditor(tile_set)),
+                    Err(err) => Log::err(format!("Open tileset error: {err:?}")),
+                }
+            }
+        } else if self
+            .path
+            .extension()
+            .is_some_and(|ext| ext == "tile_map_brush")
+        {
+            if let Ok(path) = make_relative_path(&self.path) {
+                match block_on(resource_manager.request::<TileMapBrush>(path)) {
+                    Ok(brush) => sender.send(Message::OpenTileMapBrushEditor(brush)),
+                    Err(err) => Log::err(format!("Open tile_map_brush error: {err:?}")),
                 }
             }
         } else if self.path.is_dir() {

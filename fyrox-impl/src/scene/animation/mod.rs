@@ -244,6 +244,7 @@ impl BoundValueCollectionExt for BoundValueCollection {
 /// (`animated_node`). Only then it creates an animation player node with an animation container with a single animation.
 /// To understand why this is so complicated, see the docs of [`Animation`].
 #[derive(Visit, Reflect, Clone, Debug, ComponentProvider)]
+#[reflect(derived_type = "Node")]
 pub struct AnimationPlayer {
     base: Base,
     #[component(include)]
@@ -323,7 +324,7 @@ impl ConstructorProvider<Node, Graph> for AnimationPlayer {
     fn constructor() -> NodeConstructor {
         NodeConstructor::new::<Self>()
             .with_variant("Animation Player", |_| {
-                AnimationPlayerBuilder::new(BaseBuilder::new())
+                AnimationPlayerBuilder::new(BaseBuilder::new().with_name("Animation Player"))
                     .build_node()
                     .into()
             })

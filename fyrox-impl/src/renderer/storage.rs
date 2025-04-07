@@ -24,14 +24,11 @@ use crate::{
     core::algebra::Matrix4,
     renderer::framework::{
         error::FrameworkError,
-        gpu_texture::{
-            GpuTexture, GpuTextureDescriptor, GpuTextureKind, MagnificationFilter,
-            MinificationFilter, PixelKind, WrapMode,
-        },
+        gpu_texture::{GpuTextureDescriptor, GpuTextureKind, PixelKind},
         server::GraphicsServer,
     },
 };
-use std::{cell::RefCell, rc::Rc};
+use fyrox_graphics::gpu_texture::GpuTexture;
 
 /// Generic, texture-based, storage for matrices with somewhat unlimited capacity.
 ///
@@ -40,7 +37,7 @@ use std::{cell::RefCell, rc::Rc};
 /// Why it uses textures instead of SSBO? This could be done with SSBO, but it is not available on macOS because
 /// SSBO was added only in OpenGL 4.3, but macOS support up to OpenGL 4.1.
 pub struct MatrixStorage {
-    texture: Rc<RefCell<dyn GpuTexture>>,
+    texture: GpuTexture,
     matrices: Vec<Matrix4<f32>>,
 }
 
@@ -55,11 +52,6 @@ impl MatrixStorage {
                     height: 1,
                 },
                 pixel_kind: PixelKind::RGBA32F,
-                min_filter: MinificationFilter::Nearest,
-                mag_filter: MagnificationFilter::Nearest,
-                s_wrap_mode: WrapMode::ClampToEdge,
-                t_wrap_mode: WrapMode::ClampToEdge,
-                r_wrap_mode: WrapMode::ClampToEdge,
                 data: Some(crate::core::array_as_u8_slice(&identity)),
                 ..Default::default()
             })?,
@@ -68,7 +60,7 @@ impl MatrixStorage {
     }
 
     /// Returns matrix storage texture.
-    pub fn texture(&self) -> &Rc<RefCell<dyn GpuTexture>> {
+    pub fn texture(&self) -> &GpuTexture {
         &self.texture
     }
 
@@ -94,7 +86,7 @@ impl MatrixStorage {
 
         // Upload to GPU.
         if matrices_w != 0 && matrices_h != 0 {
-            self.texture.borrow_mut().set_data(
+            self.texture.set_data(
                 GpuTextureKind::Rectangle {
                     width: matrices_w,
                     height: matrices_h,

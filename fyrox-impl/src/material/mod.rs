@@ -35,7 +35,7 @@ use crate::{
     core::{
         algebra::{Matrix2, Matrix3, Matrix4, Vector2, Vector3, Vector4},
         color::Color,
-        io::FileLoadError,
+        io::FileError,
         parking_lot::Mutex,
         reflect::prelude::*,
         sstorage::ImmutableString,
@@ -48,8 +48,8 @@ use crate::{
 };
 use fxhash::FxHashMap;
 use lazy_static::lazy_static;
+use std::any::Any;
 use std::{
-    any::Any,
     error::Error,
     fmt::{Display, Formatter},
     path::Path,
@@ -251,14 +251,6 @@ pub enum MaterialProperty {
     Bool(bool),
 
     /// An sRGB color.
-    ///
-    /// # Conversion
-    ///
-    /// The colors you see on your monitor are in sRGB color space, this is fine for simple cases
-    /// of rendering, but not for complex things like lighting. Such things require color to be
-    /// linear. Value of this variant will be automatically **converted to linear color space**
-    /// before it passed to shader. If you want to pass sRGB color ("as is"), then use
-    /// [`MaterialProperty::Vector4`].
     Color(Color),
 }
 
@@ -292,6 +284,129 @@ impl_from!(Matrix4 => Matrix4<f32>);
 impl_from!(Matrix4Array => Vec<Matrix4<f32>>);
 impl_from!(Bool => bool);
 impl_from!(Color => Color);
+
+/// A set of possible material property types.
+#[derive(Debug, Copy, Clone)]
+pub enum MaterialPropertyRef<'a> {
+    /// Real number.
+    Float(&'a f32),
+
+    /// Real number array.
+    FloatArray(&'a [f32]),
+
+    /// Integer number.
+    Int(&'a i32),
+
+    /// Integer number array.
+    IntArray(&'a [i32]),
+
+    /// Natural number.
+    UInt(&'a u32),
+
+    /// Natural number array.
+    UIntArray(&'a [u32]),
+
+    /// Two-dimensional vector.
+    Vector2(&'a Vector2<f32>),
+
+    /// Two-dimensional vector array.
+    Vector2Array(&'a [Vector2<f32>]),
+
+    /// Three-dimensional vector.
+    Vector3(&'a Vector3<f32>),
+
+    /// Three-dimensional vector array.
+    Vector3Array(&'a [Vector3<f32>]),
+
+    /// Four-dimensional vector.
+    Vector4(&'a Vector4<f32>),
+
+    /// Four-dimensional vector array.
+    Vector4Array(&'a [Vector4<f32>]),
+
+    /// 2x2 Matrix.
+    Matrix2(&'a Matrix2<f32>),
+
+    /// 2x2 Matrix array.
+    Matrix2Array(&'a [Matrix2<f32>]),
+
+    /// 3x3 Matrix.
+    Matrix3(&'a Matrix3<f32>),
+
+    /// 3x3 Matrix array.
+    Matrix3Array(&'a [Matrix3<f32>]),
+
+    /// 4x4 Matrix.
+    Matrix4(&'a Matrix4<f32>),
+
+    /// 4x4 Matrix array.
+    Matrix4Array(&'a [Matrix4<f32>]),
+
+    /// Boolean value.
+    Bool(&'a bool),
+
+    /// An sRGB color.
+    Color(&'a Color),
+}
+
+impl MaterialProperty {
+    /// Maps the inner value of the property to its respective reference.
+    pub fn as_ref(&self) -> MaterialPropertyRef<'_> {
+        match self {
+            MaterialProperty::Float(v) => MaterialPropertyRef::Float(v),
+            MaterialProperty::FloatArray(v) => MaterialPropertyRef::FloatArray(v),
+            MaterialProperty::Int(v) => MaterialPropertyRef::Int(v),
+            MaterialProperty::IntArray(v) => MaterialPropertyRef::IntArray(v),
+            MaterialProperty::UInt(v) => MaterialPropertyRef::UInt(v),
+            MaterialProperty::UIntArray(v) => MaterialPropertyRef::UIntArray(v),
+            MaterialProperty::Vector2(v) => MaterialPropertyRef::Vector2(v),
+            MaterialProperty::Vector2Array(v) => MaterialPropertyRef::Vector2Array(v),
+            MaterialProperty::Vector3(v) => MaterialPropertyRef::Vector3(v),
+            MaterialProperty::Vector3Array(v) => MaterialPropertyRef::Vector3Array(v),
+            MaterialProperty::Vector4(v) => MaterialPropertyRef::Vector4(v),
+            MaterialProperty::Vector4Array(v) => MaterialPropertyRef::Vector4Array(v),
+            MaterialProperty::Matrix2(v) => MaterialPropertyRef::Matrix2(v),
+            MaterialProperty::Matrix2Array(v) => MaterialPropertyRef::Matrix2Array(v),
+            MaterialProperty::Matrix3(v) => MaterialPropertyRef::Matrix3(v),
+            MaterialProperty::Matrix3Array(v) => MaterialPropertyRef::Matrix3Array(v),
+            MaterialProperty::Matrix4(v) => MaterialPropertyRef::Matrix4(v),
+            MaterialProperty::Matrix4Array(v) => MaterialPropertyRef::Matrix4Array(v),
+            MaterialProperty::Bool(v) => MaterialPropertyRef::Bool(v),
+            MaterialProperty::Color(v) => MaterialPropertyRef::Color(v),
+        }
+    }
+}
+
+macro_rules! impl_from_ref {
+    ($variant:ident => $value_type:ty) => {
+        impl<'a> From<&'a $value_type> for MaterialPropertyRef<'a> {
+            fn from(value: &'a $value_type) -> Self {
+                Self::$variant(value)
+            }
+        }
+    };
+}
+
+impl_from_ref!(Float => f32);
+impl_from_ref!(FloatArray => [f32]);
+impl_from_ref!(Int => i32);
+impl_from_ref!(IntArray => [i32]);
+impl_from_ref!(UInt => u32);
+impl_from_ref!(UIntArray => [u32]);
+impl_from_ref!(Vector2 => Vector2<f32>);
+impl_from_ref!(Vector2Array => [Vector2<f32>]);
+impl_from_ref!(Vector3 => Vector3<f32>);
+impl_from_ref!(Vector3Array => [Vector3<f32>]);
+impl_from_ref!(Vector4 => Vector4<f32>);
+impl_from_ref!(Vector4Array => [Vector4<f32>]);
+impl_from_ref!(Matrix2 => Matrix2<f32>);
+impl_from_ref!(Matrix2Array => [Matrix2<f32>]);
+impl_from_ref!(Matrix3 => Matrix3<f32>);
+impl_from_ref!(Matrix3Array => [Matrix3<f32>]);
+impl_from_ref!(Matrix4 => Matrix4<f32>);
+impl_from_ref!(Matrix4Array => [Matrix4<f32>]);
+impl_from_ref!(Bool => bool);
+impl_from_ref!(Color => Color);
 
 impl From<Option<TextureResource>> for MaterialResourceBinding {
     fn from(value: Option<TextureResource>) -> Self {
@@ -636,14 +751,6 @@ impl TypeUuidProvider for Material {
 }
 
 impl ResourceData for Material {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-
     fn type_uuid(&self) -> Uuid {
         <Self as TypeUuidProvider>::type_uuid()
     }
@@ -673,8 +780,8 @@ impl From<VisitError> for MaterialError {
     }
 }
 
-impl From<FileLoadError> for MaterialError {
-    fn from(value: FileLoadError) -> Self {
+impl From<FileError> for MaterialError {
+    fn from(value: FileError) -> Self {
         Self::Visit(VisitError::FileLoadError(value))
     }
 }
@@ -692,18 +799,20 @@ impl Display for MaterialError {
 lazy_static! {
     /// Standard PBR material. Keep in mind that this material is global, any modification
     /// of it will reflect on every other usage of it.
-    pub static ref STANDARD: BuiltInResource<Material> = BuiltInResource::new_no_source(
+    pub static ref STANDARD: BuiltInResource<Material> = BuiltInResource::new_no_source("__StandardMaterial",
         MaterialResource::new_ok(
-            "__StandardMaterial".into(),
+            uuid!("fac37721-d1b8-422e-ae0c-83196ecd0a26"),
+            ResourceKind::External,
             Material::from_shader(ShaderResource::standard()),
         )
     );
 
     /// Standard 2D material. Keep in mind that this material is global, any modification
     /// of it will reflect on every other usage of it.
-    pub static ref STANDARD_2D: BuiltInResource<Material> = BuiltInResource::new_no_source(
+    pub static ref STANDARD_2D: BuiltInResource<Material> = BuiltInResource::new_no_source("__Standard2DMaterial",
         MaterialResource::new_ok(
-            "__Standard2DMaterial".into(),
+            uuid!("fe78a0d0-d059-4156-bc63-c3d2e36ad4b6"),
+            ResourceKind::External,
             Material::from_shader(ShaderResource::standard_2d()),
         )
     );
@@ -711,8 +820,10 @@ lazy_static! {
     /// Standard particle system material. Keep in mind that this material is global, any modification
     /// of it will reflect on every other usage of it.
     pub static ref STANDARD_PARTICLE_SYSTEM: BuiltInResource<Material> = BuiltInResource::new_no_source(
+        "__StandardParticleSystemMaterial",
         MaterialResource::new_ok(
-            "__StandardParticleSystemMaterial".into(),
+            uuid!("5bebe6e5-4aeb-496f-88f6-abe2b1ac798b"),
+            ResourceKind::External,
             Material::from_shader(ShaderResource::standard_particle_system(),),
         )
     );
@@ -720,8 +831,10 @@ lazy_static! {
     /// Standard sprite material. Keep in mind that this material is global, any modification
     /// of it will reflect on every other usage of it.
     pub static ref STANDARD_SPRITE: BuiltInResource<Material> = BuiltInResource::new_no_source(
+        "__StandardSpriteMaterial",
         MaterialResource::new_ok(
-            "__StandardSpriteMaterial".into(),
+            uuid!("3e331786-baae-412b-9d99-7370174bca43"),
+            ResourceKind::External,
             Material::from_shader(ShaderResource::standard_sprite()),
         )
     );
@@ -729,18 +842,22 @@ lazy_static! {
     /// Standard terrain material. Keep in mind that this material is global, any modification
     /// of it will reflect on every other usage of it.
     pub static ref STANDARD_TERRAIN: BuiltInResource<Material> = BuiltInResource::new_no_source(
+        "__StandardTerrainMaterial",
         MaterialResource::new_ok(
-            "__StandardTerrainMaterial".into(),
-           Material::from_shader(ShaderResource::standard_terrain()),
+            uuid!("0e407e22-41ad-4763-9adb-9d2e86351ece"),
+            ResourceKind::External,
+            Material::from_shader(ShaderResource::standard_terrain()),
         )
     );
 
     /// Standard two-sided material. Keep in mind that this material is global, any modification
     /// of it will reflect on every other usage of it.
     pub static ref STANDARD_TWOSIDES: BuiltInResource<Material> = BuiltInResource::new_no_source(
+        "__StandardTwoSidesMaterial",
         MaterialResource::new_ok(
-            "__StandardTwoSidesMaterial".into(),
-          Material::from_shader(ShaderResource::standard_twosides()),
+            uuid!("24115321-7766-495c-bc3a-75db2f73d26d"),
+            ResourceKind::External,
+           Material::from_shader(ShaderResource::standard_twosides()),
         )
     );
 }
@@ -797,6 +914,11 @@ impl Material {
     /// Creates new instance of standard terrain material.
     pub fn standard_terrain() -> Self {
         Self::from_shader(ShaderResource::standard_terrain())
+    }
+
+    /// Creates new instance of standard tile material.
+    pub fn standard_tile() -> Self {
+        Self::from_shader(ShaderResource::standard_tile())
     }
 
     /// Creates a new material instance with given shader. By default, a material does not store any
@@ -1084,7 +1206,7 @@ pub trait MaterialResourceExtension {
     ///
     /// You must use this method to create materials, if you want hot reloading to be reliable and
     /// prevent random crashes. Unlike [`Resource::new_ok`], this method ensures that correct vtable
-    /// is used.  
+    /// is used.
     fn new(material: Material) -> Self;
 
     /// Creates a deep copy of the material resource.
@@ -1103,20 +1225,23 @@ pub trait MaterialResourceExtension {
 impl MaterialResourceExtension for MaterialResource {
     #[inline(never)] // Prevents vtable mismatch when doing hot reloading.
     fn new(material: Material) -> Self {
-        Self::new_ok(ResourceKind::Embedded, material)
+        Self::new_ok(Uuid::new_v4(), ResourceKind::Embedded, material)
     }
 
     fn deep_copy(&self) -> MaterialResource {
         let material_state = self.header();
-        let kind = material_state.kind.clone();
+        let kind = material_state.kind;
         match material_state.state {
-            ResourceState::Pending { .. } => MaterialResource::new_pending(kind),
-            ResourceState::LoadError { ref error } => {
-                MaterialResource::new_load_error(kind.clone(), error.clone())
+            ResourceState::Pending { ref path, .. } => {
+                MaterialResource::new_pending(path.clone(), kind)
             }
-            ResourceState::Ok(ref material) => MaterialResource::new_ok(
+            ResourceState::LoadError { ref error, .. } => {
+                MaterialResource::new_load_error(kind, error.clone())
+            }
+            ResourceState::Ok { ref data, .. } => MaterialResource::new_ok(
+                Uuid::new_v4(),
                 kind,
-                ResourceData::as_any(&**material)
+                (&**data as &dyn Any)
                     .downcast_ref::<Material>()
                     .unwrap()
                     .clone(),
@@ -1130,6 +1255,7 @@ pub(crate) fn visit_old_material(region: &mut RegionGuard) -> Option<MaterialRes
     if let Ok(mut inner) = region.enter_region("Material") {
         if old_material.visit("Value", &mut inner).is_ok() {
             return Some(MaterialResource::new_ok(
+                Uuid::new_v4(),
                 Default::default(),
                 old_material.lock().clone(),
             ));
@@ -1150,7 +1276,11 @@ where
         if old_texture.visit("Value", &mut inner).is_ok() {
             let mut material = make_default_material();
             material.bind("diffuseTexture", old_texture);
-            return Some(MaterialResource::new_ok(Default::default(), material));
+            return Some(MaterialResource::new_ok(
+                Uuid::new_v4(),
+                Default::default(),
+                material,
+            ));
         }
     }
     None

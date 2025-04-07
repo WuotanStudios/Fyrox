@@ -18,24 +18,28 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::framebuffer::{BufferDataUsage, BufferLocation, TextureShaderLocation};
-use crate::gl::geometry_buffer::GlGeometryBuffer;
 use crate::{
-    buffer::{Buffer, BufferKind},
+    buffer::GpuBufferTrait,
     core::{color::Color, math::Rect},
     error::FrameworkError,
-    framebuffer::{Attachment, AttachmentKind, FrameBuffer, ResourceBindGroup, ResourceBinding},
-    geometry_buffer::{DrawCallStatistics, GeometryBuffer},
+    framebuffer::ReadTarget,
+    framebuffer::{
+        Attachment, AttachmentKind, BufferDataUsage, DrawCallStatistics, GpuFrameBuffer,
+        GpuFrameBufferTrait, ResourceBindGroup, ResourceBinding,
+    },
+    geometry_buffer::GpuGeometryBuffer,
+    gl::sampler::GlSampler,
     gl::{
-        buffer::GlBuffer, program::GlProgram, server::GlGraphicsServer, texture::GlTexture,
-        ToGlConstant,
+        buffer::GlBuffer, geometry_buffer::GlGeometryBuffer, program::GlProgram,
+        server::GlGraphicsServer, texture::GlTexture, ToGlConstant,
     },
     gpu_program::GpuProgram,
-    gpu_texture::{CubeMapFace, GpuTexture, GpuTextureKind, PixelElementKind},
+    gpu_texture::image_2d_size_bytes,
+    gpu_texture::{CubeMapFace, GpuTextureKind, GpuTextureTrait, PixelElementKind},
     ColorMask, DrawParameters, ElementRange,
 };
-use glow::HasContext;
-use std::{any::Any, rc::Weak};
+use glow::{HasContext, PixelPackData};
+use std::rc::Weak;
 
 pub struct GlFrameBuffer {
     state: Weak<GlGraphicsServer>,
@@ -104,8 +108,11 @@ impl GlFrameBuffer {
                     AttachmentKind::DepthStencil => glow::DEPTH_STENCIL_ATTACHMENT,
                     AttachmentKind::Depth => glow::DEPTH_ATTACHMENT,
                 };
-                let guard = depth_attachment.texture.borrow();
-                let texture = guard.as_any().downcast_ref::<GlTexture>().unwrap();
+                let texture = depth_attachment
+                    .texture
+                    .as_any()
+                    .downcast_ref::<GlTexture>()
+                    .unwrap();
                 set_attachment(server, depth_attachment_kind, texture);
             }
 
@@ -113,8 +120,11 @@ impl GlFrameBuffer {
             for (i, color_attachment) in color_attachments.iter().enumerate() {
                 assert_eq!(color_attachment.kind, AttachmentKind::Color);
                 let color_attachment_kind = glow::COLOR_ATTACHMENT0 + i as u32;
-                let guard = color_attachment.texture.borrow();
-                let texture = guard.as_any().downcast_ref::<GlTexture>().unwrap();
+                let texture = color_attachment
+                    .texture
+                    .as_any()
+                    .downcast_ref::<GlTexture>()
+                    .unwrap();
                 set_attachment(server, color_attachment_kind, texture);
                 color_buffers.push(color_attachment_kind);
             }
@@ -155,15 +165,7 @@ impl GlFrameBuffer {
     }
 }
 
-impl FrameBuffer for GlFrameBuffer {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-
+impl GpuFrameBufferTrait for GlFrameBuffer {
     fn color_attachments(&self) -> &[Attachment] {
         &self.color_attachments
     }
@@ -172,15 +174,18 @@ impl FrameBuffer for GlFrameBuffer {
         self.depth_attachment.as_ref()
     }
 
-    fn set_cubemap_face(&mut self, attachment_index: usize, face: CubeMapFace) {
+    fn set_cubemap_face(&self, attachment_index: usize, face: CubeMapFace) {
         let server = self.state.upgrade().unwrap();
 
         unsafe {
             server.set_framebuffer(self.fbo);
 
             let attachment = self.color_attachments.get(attachment_index).unwrap();
-            let guard = attachment.texture.borrow();
-            let texture = guard.as_any().downcast_ref::<GlTexture>().unwrap();
+            let texture = attachment
+                .texture
+                .as_any()
+                .downcast_ref::<GlTexture>()
+                .unwrap();
             server.gl.framebuffer_texture_2d(
                 glow::FRAMEBUFFER,
                 glow::COLOR_ATTACHMENT0 + attachment_index as u32,
@@ -193,7 +198,7 @@ impl FrameBuffer for GlFrameBuffer {
 
     fn blit_to(
         &self,
-        dest: &dyn FrameBuffer,
+        dest: &GpuFrameBuffer,
         src_x0: i32,
         src_y0: i32,
         src_x1: i32,
@@ -244,8 +249,52 @@ impl FrameBuffer for GlFrameBuffer {
         }
     }
 
+    fn read_pixels(&self, read_target: ReadTarget) -> Option<Vec<u8>> {
+        let server = self.state.upgrade()?;
+        server.set_framebuffer(self.id());
+
+        unsafe {
+            server
+                .gl
+                .bind_framebuffer(glow::READ_FRAMEBUFFER, self.id());
+        }
+
+        let texture = match read_target {
+            ReadTarget::Depth | ReadTarget::Stencil => &self.depth_attachment.as_ref()?.texture,
+            ReadTarget::Color(index) => {
+                unsafe {
+                    server
+                        .gl
+                        .read_buffer(glow::COLOR_ATTACHMENT0 + index as u32);
+                }
+
+                &self.color_attachments.get(index)?.texture
+            }
+        };
+
+        if let GpuTextureKind::Rectangle { width, height } = texture.kind() {
+            let pixel_kind = texture.pixel_kind();
+            let pixel_info = pixel_kind.pixel_descriptor();
+            let mut buffer = vec![0; image_2d_size_bytes(pixel_kind, width, height)];
+            unsafe {
+                server.gl.read_pixels(
+                    0,
+                    0,
+                    width as i32,
+                    height as i32,
+                    pixel_info.format,
+                    pixel_info.data_type,
+                    PixelPackData::Slice(Some(buffer.as_mut_slice())),
+                );
+            }
+            Some(buffer)
+        } else {
+            None
+        }
+    }
+
     fn clear(
-        &mut self,
+        &self,
         viewport: Rect<i32>,
         color: Option<Color>,
         depth: Option<f32>,
@@ -322,7 +371,7 @@ impl FrameBuffer for GlFrameBuffer {
                 server.set_color_write(ColorMask::default());
 
                 for (i, attachment) in self.color_attachments.iter().enumerate() {
-                    match attachment.texture.borrow().pixel_kind().element_kind() {
+                    match attachment.texture.pixel_kind().element_kind() {
                         PixelElementKind::Float | PixelElementKind::NormalizedUnsignedInteger => {
                             let fvalues = color.as_frgba();
                             server.gl.clear_buffer_f32_slice(
@@ -360,10 +409,10 @@ impl FrameBuffer for GlFrameBuffer {
     }
 
     fn draw(
-        &mut self,
-        geometry: &dyn GeometryBuffer,
+        &self,
+        geometry: &GpuGeometryBuffer,
         viewport: Rect<i32>,
-        program: &dyn GpuProgram,
+        program: &GpuProgram,
         params: &DrawParameters,
         resources: &[ResourceBindGroup],
         element_range: ElementRange,
@@ -376,23 +425,23 @@ impl FrameBuffer for GlFrameBuffer {
 
         pre_draw(self.id(), &server, viewport, program, params, resources);
 
-        let (offset, count) = match element_range {
+        let (offset, element_count) = match element_range {
             ElementRange::Full => (0, geometry.element_count.get()),
             ElementRange::Specific { offset, count } => (offset, count),
         };
 
-        let last_triangle_index = offset + count;
+        let last_element_index = offset + element_count;
 
-        if last_triangle_index > geometry.element_count.get() {
+        if last_element_index > geometry.element_count.get() {
             Err(FrameworkError::InvalidElementRange {
                 start: offset,
-                end: last_triangle_index,
+                end: last_element_index,
                 total: geometry.element_count.get(),
             })
         } else {
             let index_per_element = geometry.element_kind.index_per_element();
             let start_index = offset * index_per_element;
-            let index_count = count * index_per_element;
+            let index_count = element_count * index_per_element;
 
             unsafe {
                 if index_count > 0 {
@@ -408,19 +457,22 @@ impl FrameBuffer for GlFrameBuffer {
                 }
             }
 
-            Ok(DrawCallStatistics { triangles: count })
+            Ok(DrawCallStatistics {
+                triangles: element_count,
+            })
         }
     }
 
     fn draw_instances(
-        &mut self,
-        count: usize,
-        geometry: &dyn GeometryBuffer,
+        &self,
+        instance_count: usize,
+        geometry: &GpuGeometryBuffer,
         viewport: Rect<i32>,
-        program: &dyn GpuProgram,
+        program: &GpuProgram,
         params: &DrawParameters,
         resources: &[ResourceBindGroup],
-    ) -> DrawCallStatistics {
+        element_range: ElementRange,
+    ) -> Result<DrawCallStatistics, FrameworkError> {
         let server = self.state.upgrade().unwrap();
         let geometry = geometry
             .as_any()
@@ -429,23 +481,41 @@ impl FrameBuffer for GlFrameBuffer {
 
         pre_draw(self.id(), &server, viewport, program, params, resources);
 
-        let index_per_element = geometry.element_kind.index_per_element();
-        let index_count = geometry.element_count.get() * index_per_element;
-        if index_count > 0 {
-            unsafe {
-                server.set_vertex_array_object(Some(geometry.vertex_array_object));
+        let (offset, element_count) = match element_range {
+            ElementRange::Full => (0, geometry.element_count.get()),
+            ElementRange::Specific { offset, count } => (offset, count),
+        };
 
-                server.gl.draw_elements_instanced(
-                    geometry.mode(),
-                    index_count as i32,
-                    glow::UNSIGNED_INT,
-                    0,
-                    count as i32,
-                )
+        let last_element_index = offset + element_count;
+
+        if last_element_index > geometry.element_count.get() {
+            Err(FrameworkError::InvalidElementRange {
+                start: offset,
+                end: last_element_index,
+                total: geometry.element_count.get(),
+            })
+        } else {
+            let index_per_element = geometry.element_kind.index_per_element();
+            let start_index = offset * index_per_element;
+            let index_count = geometry.element_count.get() * index_per_element;
+
+            unsafe {
+                if index_count > 0 {
+                    server.set_vertex_array_object(Some(geometry.vertex_array_object));
+                    let indices = (start_index * size_of::<u32>()) as i32;
+                    server.gl.draw_elements_instanced(
+                        geometry.mode(),
+                        index_count as i32,
+                        glow::UNSIGNED_INT,
+                        indices,
+                        instance_count as i32,
+                    )
+                }
             }
-        }
-        DrawCallStatistics {
-            triangles: geometry.element_count.get() * count,
+
+            Ok(DrawCallStatistics {
+                triangles: geometry.element_count.get() * instance_count,
+            })
         }
     }
 }
@@ -454,7 +524,7 @@ fn pre_draw(
     fbo: Option<glow::Framebuffer>,
     server: &GlGraphicsServer,
     viewport: Rect<i32>,
-    program: &dyn GpuProgram,
+    program: &GpuProgram,
     params: &DrawParameters,
     resources: &[ResourceBindGroup],
 ) {
@@ -464,31 +534,26 @@ fn pre_draw(
     let program = program.as_any().downcast_ref::<GlProgram>().unwrap();
     server.set_program(Some(program.id));
 
-    let mut texture_unit = 0;
-    let mut automatic_binding_index = 0;
     for bind_group in resources {
         for binding in bind_group.bindings {
             match binding {
                 ResourceBinding::Texture {
                     texture,
-                    shader_location,
+                    sampler,
+                    binding: shader_location,
                 } => {
-                    let texture = texture.borrow();
                     let texture = texture.as_any().downcast_ref::<GlTexture>().unwrap();
-                    match shader_location {
-                        TextureShaderLocation::Uniform(uniform) => {
-                            unsafe { server.gl.uniform_1_i32(Some(&uniform.id), texture_unit) };
-                            texture.bind(server, texture_unit as u32);
-                            texture_unit += 1;
-                        }
-                        TextureShaderLocation::ExplicitBinding(binding) => {
-                            texture.bind(server, *binding as u32);
-                        }
-                    }
+                    texture.bind(server, *shader_location as u32);
+                    let sampler = sampler.as_any().downcast_ref::<GlSampler>().unwrap();
+                    unsafe {
+                        server
+                            .gl
+                            .bind_sampler(*shader_location as u32, Some(sampler.id))
+                    };
                 }
                 ResourceBinding::Buffer {
                     buffer,
-                    binding: shader_location,
+                    binding,
                     data_usage: data_location,
                 } => {
                     let gl_buffer = buffer
@@ -497,17 +562,14 @@ fn pre_draw(
                         .expect("Must be OpenGL buffer");
 
                     unsafe {
-                        let actual_binding = match shader_location {
-                            BufferLocation::Auto { .. } => automatic_binding_index,
-                            BufferLocation::Explicit { binding } => *binding,
-                        };
+                        let actual_binding = *binding as u32;
 
                         match data_location {
                             BufferDataUsage::UseSegment { offset, size } => {
                                 assert_ne!(*size, 0);
                                 server.gl.bind_buffer_range(
                                     gl_buffer.kind().into_gl(),
-                                    actual_binding as u32,
+                                    actual_binding,
                                     Some(gl_buffer.id),
                                     *offset as i32,
                                     *size as i32,
@@ -516,26 +578,10 @@ fn pre_draw(
                             BufferDataUsage::UseEverything => {
                                 server.gl.bind_buffer_base(
                                     gl_buffer.kind().into_gl(),
-                                    actual_binding as u32,
+                                    actual_binding,
                                     Some(gl_buffer.id),
                                 );
                             }
-                        }
-
-                        if let BufferLocation::Auto { shader_location } = shader_location {
-                            match gl_buffer.kind() {
-                                BufferKind::Uniform => server.gl.uniform_block_binding(
-                                    program.id,
-                                    *shader_location as u32,
-                                    automatic_binding_index as u32,
-                                ),
-                                BufferKind::Vertex
-                                | BufferKind::Index
-                                | BufferKind::PixelRead
-                                | BufferKind::PixelWrite => {}
-                            }
-
-                            automatic_binding_index += 1;
                         }
                     }
                 }

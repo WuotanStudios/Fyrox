@@ -32,24 +32,21 @@ use crate::{
         cache::{shader::ShaderCache, texture::TextureCache, uniform::UniformMemoryAllocator},
         framework::{
             error::FrameworkError,
-            framebuffer::{Attachment, AttachmentKind, FrameBuffer},
-            gpu_texture::{
-                CubeMapFace, GpuTexture, GpuTextureDescriptor, GpuTextureKind, MagnificationFilter,
-                MinificationFilter, PixelKind, WrapMode,
-            },
+            framebuffer::{Attachment, AttachmentKind},
+            gpu_texture::{CubeMapFace, GpuTextureDescriptor, GpuTextureKind, PixelKind},
             server::GraphicsServer,
         },
+        framework::{framebuffer::GpuFrameBuffer, gpu_texture::GpuTexture},
         shadow::cascade_size,
-        FallbackResources, GeometryCache, RenderPassStatistics, ShadowMapPrecision,
-        POINT_SHADOW_PASS_NAME,
+        DynamicSurfaceCache, FallbackResources, GeometryCache, RenderPassStatistics,
+        ShadowMapPrecision, POINT_SHADOW_PASS_NAME,
     },
     scene::graph::Graph,
 };
-use std::{cell::RefCell, rc::Rc};
 
 pub struct PointShadowMapRenderer {
     precision: ShadowMapPrecision,
-    cascades: [Box<dyn FrameBuffer>; 3],
+    cascades: [GpuFrameBuffer; 3],
     size: usize,
     faces: [PointShadowCubeMapFace; 6],
 }
@@ -61,6 +58,7 @@ struct PointShadowCubeMapFace {
 }
 
 pub(crate) struct PointShadowMapRenderContext<'a> {
+    pub elapsed_time: f32,
     pub state: &'a dyn GraphicsServer,
     pub graph: &'a Graph,
     pub light_pos: Vector3<f32>,
@@ -71,6 +69,7 @@ pub(crate) struct PointShadowMapRenderContext<'a> {
     pub texture_cache: &'a mut TextureCache,
     pub fallback_resources: &'a FallbackResources,
     pub uniform_memory_allocator: &'a mut UniformMemoryAllocator,
+    pub dynamic_surface_cache: &'a mut DynamicSurfaceCache,
 }
 
 impl PointShadowMapRenderer {
@@ -83,7 +82,7 @@ impl PointShadowMapRenderer {
             server: &dyn GraphicsServer,
             size: usize,
             precision: ShadowMapPrecision,
-        ) -> Result<Box<dyn FrameBuffer>, FrameworkError> {
+        ) -> Result<GpuFrameBuffer, FrameworkError> {
             let depth = server.create_2d_render_target(
                 match precision {
                     ShadowMapPrecision::Full => PixelKind::D32F,
@@ -99,11 +98,6 @@ impl PointShadowMapRenderer {
                     height: size,
                 },
                 pixel_kind: PixelKind::R16F,
-                min_filter: MinificationFilter::Nearest,
-                mag_filter: MagnificationFilter::Nearest,
-                s_wrap_mode: WrapMode::ClampToEdge,
-                t_wrap_mode: WrapMode::ClampToEdge,
-                r_wrap_mode: WrapMode::ClampToEdge,
                 ..Default::default()
             })?;
 
@@ -170,10 +164,8 @@ impl PointShadowMapRenderer {
         self.precision
     }
 
-    pub fn cascade_texture(&self, cascade: usize) -> Rc<RefCell<dyn GpuTexture>> {
-        self.cascades[cascade].color_attachments()[0]
-            .texture
-            .clone()
+    pub fn cascade_texture(&self, cascade: usize) -> &GpuTexture {
+        &self.cascades[cascade].color_attachments()[0].texture
     }
 
     pub(crate) fn render(
@@ -183,6 +175,7 @@ impl PointShadowMapRenderer {
         let mut statistics = RenderPassStatistics::default();
 
         let PointShadowMapRenderContext {
+            elapsed_time,
             state,
             graph,
             light_pos,
@@ -193,9 +186,10 @@ impl PointShadowMapRenderer {
             texture_cache,
             fallback_resources,
             uniform_memory_allocator,
+            dynamic_surface_cache,
         } = args;
 
-        let framebuffer = &mut *self.cascades[cascade];
+        let framebuffer = &self.cascades[cascade];
         let cascade_size = cascade_size(self.size, cascade);
 
         let viewport = Rect::new(0, 0, cascade_size as i32, cascade_size as i32);
@@ -218,6 +212,7 @@ impl PointShadowMapRenderer {
 
             let bundle_storage = RenderDataBundleStorage::from_graph(
                 graph,
+                elapsed_time,
                 ObserverInfo {
                     observer_position: light_pos,
                     z_near,
@@ -229,6 +224,7 @@ impl PointShadowMapRenderer {
                 RenderDataBundleStorageOptions {
                     collect_lights: false,
                 },
+                dynamic_surface_cache,
             );
 
             statistics += bundle_storage.render_to_frame_buffer(

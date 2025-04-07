@@ -22,20 +22,20 @@
 //! [`UniformBufferCache`] for more info.
 
 use crate::renderer::framework::{
-    buffer::{Buffer, BufferKind, BufferUsage},
+    buffer::{BufferKind, BufferUsage},
     error::FrameworkError,
     framebuffer::{BufferDataUsage, ResourceBinding},
     server::GraphicsServer,
     uniform::{ByteStorage, DynamicUniformBuffer, UniformBuffer},
 };
 use fxhash::FxHashMap;
-use fyrox_graphics::framebuffer::BufferLocation;
+use fyrox_graphics::buffer::GpuBuffer;
 use fyrox_graphics::server::SharedGraphicsServer;
 use std::cell::RefCell;
 
 #[derive(Default)]
 struct UniformBufferSet {
-    buffers: Vec<Box<dyn Buffer>>,
+    buffers: Vec<GpuBuffer>,
     free: usize,
 }
 
@@ -48,17 +48,17 @@ impl UniformBufferSet {
         &mut self,
         size: usize,
         server: &dyn GraphicsServer,
-    ) -> Result<&dyn Buffer, FrameworkError> {
+    ) -> Result<GpuBuffer, FrameworkError> {
         if self.free < self.buffers.len() {
             let buffer = &self.buffers[self.free];
             self.free += 1;
-            Ok(&**buffer)
+            Ok(buffer.clone())
         } else {
             let buffer =
                 server.create_buffer(size, BufferKind::Uniform, BufferUsage::StreamCopy)?;
             self.buffers.push(buffer);
             self.free = self.buffers.len();
-            Ok(&**self.buffers.last().unwrap())
+            Ok(self.buffers.last().unwrap().clone())
         }
     }
 }
@@ -83,19 +83,15 @@ impl UniformBufferCache {
 
     /// Reserves one of the existing uniform buffers of the given size. If there's no such free buffer,
     /// this method creates a new one and reserves it for further use.
-    pub fn get_or_create<'a>(&'a self, size: usize) -> Result<&'a dyn Buffer, FrameworkError> {
+    pub fn get_or_create(&self, size: usize) -> Result<GpuBuffer, FrameworkError> {
         let mut cache = self.cache.borrow_mut();
         let set = cache.entry(size).or_default();
-        let buffer = set.get_or_create(size, &*self.server)?;
-        // SAFETY: GPU buffer "lives" in memory heap, so any potential memory reallocation of the
-        // hash map won't affect the returned reference. Also, buffers cannot be deleted so the
-        // reference is also valid. These reasons allows to extend lifetime to the lifetime of self.
-        Ok(unsafe { std::mem::transmute::<&'_ dyn Buffer, &'a dyn Buffer>(buffer) })
+        set.get_or_create(size, &*self.server)
     }
 
     /// Fetches a suitable (or creates new one) GPU uniform buffer for the given CPU uniform buffer
     /// and writes the data to it, returns a reference to the buffer.
-    pub fn write<T>(&self, uniform_buffer: UniformBuffer<T>) -> Result<&dyn Buffer, FrameworkError>
+    pub fn write<T>(&self, uniform_buffer: UniformBuffer<T>) -> Result<GpuBuffer, FrameworkError>
     where
         T: ByteStorage,
     {
@@ -136,7 +132,7 @@ pub struct UniformBlockLocation {
 }
 
 pub struct UniformMemoryAllocator {
-    gpu_buffers: Vec<Box<dyn Buffer>>,
+    gpu_buffers: Vec<GpuBuffer>,
     block_alignment: usize,
     max_uniform_buffer_size: usize,
     pages: Vec<Page>,
@@ -234,10 +230,8 @@ impl UniformMemoryAllocator {
         binding_point: usize,
     ) -> ResourceBinding {
         ResourceBinding::Buffer {
-            buffer: &*self.gpu_buffers[block.page],
-            binding: BufferLocation::Explicit {
-                binding: binding_point,
-            },
+            buffer: self.gpu_buffers[block.page].clone(),
+            binding: binding_point,
             data_usage: BufferDataUsage::UseSegment {
                 offset: block.offset,
                 size: block.size,

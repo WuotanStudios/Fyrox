@@ -33,21 +33,22 @@ use crate::{
     error::SoundError,
 };
 use fyrox_core::{
-    io::FileLoadError, reflect::prelude::*, uuid::Uuid, visitor::prelude::*, TypeUuidProvider,
+    io::FileError, reflect::prelude::*, uuid::Uuid, visitor::prelude::*, TypeUuidProvider,
 };
+use fyrox_resource::untyped::ResourceKind;
 use fyrox_resource::{
     io::{FileReader, ResourceIo},
     Resource, ResourceData, SOUND_BUFFER_RESOURCE_UUID,
 };
-use std::error::Error;
 use std::{
-    any::Any,
+    error::Error,
     fmt::Debug,
     io::{Cursor, Read, Seek, SeekFrom},
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
     time::Duration,
 };
+use symphonia::core::io::MediaSource;
 
 pub mod generic;
 pub mod loader;
@@ -108,12 +109,16 @@ pub trait RawStreamingDataSource: Iterator<Item = f32> + Send + Sync + Debug {
     fn channel_count(&self) -> usize;
 
     /// Tells whether the provider should restart.
+    ///
+    /// Default implementation calls [`Self::time_seek`] with a zero duration
     fn rewind(&mut self) -> Result<(), SoundError> {
-        Ok(())
+        self.time_seek(Duration::from_secs(0))
     }
 
     /// Allows you to start playback from given duration.
-    fn time_seek(&mut self, _duration: Duration) {}
+    fn time_seek(&mut self, _duration: Duration) -> Result<(), SoundError> {
+        Ok(())
+    }
 
     /// Returns total duration of the data.
     fn channel_duration_in_samples(&self) -> usize {
@@ -123,7 +128,7 @@ pub trait RawStreamingDataSource: Iterator<Item = f32> + Send + Sync + Debug {
 
 impl DataSource {
     /// Tries to create new `File` data source from given path. May fail if file does not exists.
-    pub async fn from_file<P>(path: P, io: &dyn ResourceIo) -> Result<Self, FileLoadError>
+    pub async fn from_file<P>(path: P, io: &dyn ResourceIo) -> Result<Self, FileError>
     where
         P: AsRef<Path>,
     {
@@ -182,14 +187,55 @@ impl Seek for DataSource {
     }
 }
 
+impl MediaSource for DataSource {
+    fn is_seekable(&self) -> bool {
+        match self {
+            DataSource::File { .. } | DataSource::Memory(_) => true,
+            DataSource::Raw { .. } | DataSource::RawStreaming(_) => false,
+        }
+    }
+
+    fn byte_len(&self) -> Option<u64> {
+        match self {
+            DataSource::File { path: _, data } => data.byte_len(),
+            DataSource::Memory(cursor) => MediaSource::byte_len(cursor),
+            DataSource::Raw { .. } | DataSource::RawStreaming(_) => None,
+        }
+    }
+}
+
 /// An error that can occur during loading of sound buffer.
 #[derive(Debug)]
 pub enum SoundBufferResourceLoadError {
     /// A format is not supported.
     UnsupportedFormat,
     /// File load error.
-    Io(FileLoadError),
+    Io(FileError),
+    /// Errors involving the data source
+    ///
+    /// This could be, e.g., wrong number of channels, or attempting to use a
+    /// [`DataSource::RawStreaming`] where it doesn't make sense
+    DataSourceError,
+    /// Underlying sound error
+    SoundError(SoundError),
 }
+
+impl std::fmt::Display for SoundBufferResourceLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SoundBufferResourceLoadError::UnsupportedFormat => {
+                write!(f, "unsupported file format")
+            }
+            SoundBufferResourceLoadError::Io(e) => write!(f, "{e:?}"),
+            SoundBufferResourceLoadError::DataSourceError => {
+                write!(f, "error in underlying data source")
+            }
+            SoundBufferResourceLoadError::SoundError(e) => write!(f, "{e:?}"),
+        }
+    }
+}
+
+impl std::error::Error for SoundBufferResourceLoadError {}
 
 /// Sound buffer is a data source for sound sources. See module documentation for more info.
 #[derive(Debug, Visit, Reflect)]
@@ -205,31 +251,45 @@ pub enum SoundBuffer {
     Streaming(StreamingBuffer),
 }
 
+impl From<SoundError> for SoundBufferResourceLoadError {
+    fn from(err: SoundError) -> Self {
+        Self::SoundError(err)
+    }
+}
+
 /// Type alias for sound buffer resource.
 pub type SoundBufferResource = Resource<SoundBuffer>;
 
 /// Extension trait for sound buffer resource.
 pub trait SoundBufferResourceExtension {
     /// Tries to create new streaming sound buffer from a given data source.
-    fn new_streaming(data_source: DataSource) -> Result<Resource<SoundBuffer>, DataSource>;
+    fn new_streaming(
+        data_source: DataSource,
+    ) -> Result<Resource<SoundBuffer>, SoundBufferResourceLoadError>;
 
     /// Tries to create new generic sound buffer from a given data source.
-    fn new_generic(data_source: DataSource) -> Result<Resource<SoundBuffer>, DataSource>;
+    fn new_generic(
+        data_source: DataSource,
+    ) -> Result<Resource<SoundBuffer>, SoundBufferResourceLoadError>;
 }
 
 impl SoundBufferResourceExtension for SoundBufferResource {
-    fn new_streaming(data_source: DataSource) -> Result<Resource<SoundBuffer>, DataSource> {
-        let path = data_source.path_owned();
+    fn new_streaming(
+        data_source: DataSource,
+    ) -> Result<Resource<SoundBuffer>, SoundBufferResourceLoadError> {
         Ok(Resource::new_ok(
-            path.into(),
+            Uuid::new_v4(),
+            ResourceKind::External,
             SoundBuffer::Streaming(StreamingBuffer::new(data_source)?),
         ))
     }
 
-    fn new_generic(data_source: DataSource) -> Result<Resource<SoundBuffer>, DataSource> {
-        let path = data_source.path_owned();
+    fn new_generic(
+        data_source: DataSource,
+    ) -> Result<Resource<SoundBuffer>, SoundBufferResourceLoadError> {
         Ok(Resource::new_ok(
-            path.into(),
+            Uuid::new_v4(),
+            ResourceKind::External,
             SoundBuffer::Generic(GenericBuffer::new(data_source)?),
         ))
     }
@@ -244,13 +304,13 @@ impl TypeUuidProvider for SoundBuffer {
 impl SoundBuffer {
     /// Tries to create new streaming sound buffer from a given data source. It returns raw sound
     /// buffer that has to be wrapped into Arc<Mutex<>> for use with sound sources.
-    pub fn raw_streaming(data_source: DataSource) -> Result<Self, DataSource> {
+    pub fn raw_streaming(data_source: DataSource) -> Result<Self, SoundBufferResourceLoadError> {
         Ok(Self::Streaming(StreamingBuffer::new(data_source)?))
     }
 
     /// Tries to create new generic sound buffer from a given data source. It returns raw sound
     /// buffer that has to be wrapped into Arc<Mutex<>> for use with sound sources.
-    pub fn raw_generic(data_source: DataSource) -> Result<Self, DataSource> {
+    pub fn raw_generic(data_source: DataSource) -> Result<Self, SoundBufferResourceLoadError> {
         Ok(Self::Generic(GenericBuffer::new(data_source)?))
     }
 }
@@ -286,14 +346,6 @@ impl DerefMut for SoundBuffer {
 }
 
 impl ResourceData for SoundBuffer {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-
     fn type_uuid(&self) -> Uuid {
         SOUND_BUFFER_RESOURCE_UUID
     }

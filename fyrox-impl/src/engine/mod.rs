@@ -33,6 +33,7 @@ use crate::resource::texture::{
     CompressionOptions, TextureImportOptions, TextureMinificationFilter, TextureResource,
     TextureResourceExtension,
 };
+use crate::scene::tilemap::{CustomTileCollider, TileMapData};
 use crate::{
     asset::{
         event::ResourceEvent,
@@ -106,10 +107,12 @@ use fxhash::{FxHashMap, FxHashSet};
 use fyrox_animation::AnimationTracksData;
 use fyrox_graphics::gl::server::GlGraphicsServer;
 use fyrox_graphics::server::SharedGraphicsServer;
+use fyrox_resource::registry::ResourceRegistry;
 use fyrox_sound::{
     buffer::{loader::SoundBufferLoader, SoundBuffer},
     renderer::hrtf::{HrirSphereLoader, HrirSphereResourceData},
 };
+use std::cell::Cell;
 use std::rc::Rc;
 use std::{
     any::TypeId,
@@ -124,6 +127,7 @@ use std::{
     },
     time::Duration,
 };
+use uuid::Uuid;
 use winit::window::Icon;
 use winit::{
     dpi::{Position, Size},
@@ -196,6 +200,7 @@ impl InitializedGraphicsContext {
     /// with [`include_bytes`] macro to pass file's data directly.
     pub fn set_window_icon_from_memory(&mut self, data: &[u8]) {
         if let Ok(texture) = TextureResource::load_from_memory(
+            Uuid::new_v4(),
             ResourceKind::Embedded,
             data,
             TextureImportOptions::default()
@@ -553,7 +558,7 @@ impl ScriptMessageDispatcher {
         while let Ok(message) = self.message_receiver.try_recv() {
             let receivers = self.type_groups.get(&message.payload.deref().type_id());
 
-            if receivers.map_or(true, |r| r.is_empty()) {
+            if receivers.is_none_or(|r| r.is_empty()) {
                 Log::warn(format!(
                     "Script message {message:?} was sent, but there's no receivers. \
                     Did you forgot to subscribe your script to the message?"
@@ -982,7 +987,7 @@ impl ResourceGraphVertex {
                         .get_scene()
                         .graph
                         .linear_iter()
-                        .any(|n| n.resource.as_ref().map_or(false, |r| r == &model))
+                        .any(|n| n.resource.as_ref() == Some(&model))
                     {
                         dependent_resources.insert(other_model.clone());
                     }
@@ -1230,15 +1235,6 @@ pub(crate) fn initialize_resource_manager_loaders(
 
     let mut state = resource_manager.state();
 
-    #[cfg(feature = "gltf")]
-    {
-        let gltf_loader = super::resource::gltf::GltfLoader {
-            resource_manager: resource_manager.clone(),
-            default_import_options: Default::default(),
-        };
-        state.loaders.set(gltf_loader);
-    }
-
     for shader in ShaderResource::standard_shaders() {
         state.built_in_resources.add((*shader).clone());
     }
@@ -1286,10 +1282,17 @@ pub(crate) fn initialize_resource_manager_loaders(
     state.constructors_container.add::<SurfaceData>();
     state.constructors_container.add::<TileSet>();
     state.constructors_container.add::<TileMapBrush>();
+    state.constructors_container.add::<TileMapData>();
+    state.constructors_container.add::<CustomTileCollider>();
     state.constructors_container.add::<AnimationTracksData>();
     state.constructors_container.add::<Style>();
 
-    let loaders = &mut state.loaders;
+    let mut loaders = state.loaders.lock();
+    let gltf_loader = super::resource::gltf::GltfLoader {
+        resource_manager: resource_manager.clone(),
+        default_import_options: Default::default(),
+    };
+    loaders.set(gltf_loader);
     loaders.set(model_loader);
     loaders.set(TextureLoader {
         default_import_options: Default::default(),
@@ -1311,8 +1314,36 @@ pub(crate) fn initialize_resource_manager_loaders(
     loaders.set(TileSetLoader {
         resource_manager: resource_manager.clone(),
     });
-    state.loaders.set(TileMapBrushLoader {});
-    state.loaders.set(StyleLoader);
+    loaders.set(TileMapBrushLoader {
+        resource_manager: resource_manager.clone(),
+    });
+    loaders.set(StyleLoader {
+        resource_manager: resource_manager.clone(),
+    });
+}
+
+/// A controller for the application loop.
+#[derive(Copy, Clone)]
+pub enum ApplicationLoopController<'a> {
+    /// Headless loop controller. This variant is used when the engine is running in headless mode
+    /// (with no window, graphics, sound, etc. support), usually used by game servers.
+    Headless {
+        /// A variable that controls execution of the game loop. If set to `false` the loop will
+        /// exit and the application will end its execution.
+        running: &'a Cell<bool>,
+    },
+    /// Normal application loop controller with full window, graphics, sound support.
+    WindowTarget(&'a EventLoopWindowTarget<()>),
+}
+
+impl ApplicationLoopController<'_> {
+    /// Asks the loop controller to end the application execution.
+    pub fn exit(&self) {
+        match self {
+            ApplicationLoopController::Headless { running } => running.set(false),
+            ApplicationLoopController::WindowTarget(window_target) => window_target.exit(),
+        }
+    }
 }
 
 impl Engine {
@@ -1377,6 +1408,8 @@ impl Engine {
 
         let user_interfaces =
             UiContainer::new_with_ui(UserInterface::new(Vector2::new(100.0, 100.0)));
+
+        resource_manager.update_and_load_registry(ResourceRegistry::DEFAULT_PATH);
 
         Ok(Self {
             graphics_context: GraphicsContext::Uninitialized(graphics_context_params),
@@ -1560,14 +1593,14 @@ impl Engine {
     pub fn update(
         &mut self,
         dt: f32,
-        window_target: &EventLoopWindowTarget<()>,
+        controller: ApplicationLoopController,
         lag: &mut f32,
         switches: FxHashMap<Handle<Scene>, GraphUpdateSwitches>,
     ) {
-        self.handle_async_scene_loading(dt, lag, window_target);
-        self.pre_update(dt, window_target, lag, switches);
-        self.post_update(dt, &Default::default(), lag, window_target);
-        self.handle_plugins_hot_reloading(dt, window_target, lag, |_| {});
+        self.handle_async_scene_loading(dt, lag, controller);
+        self.pre_update(dt, controller, lag, switches);
+        self.post_update(dt, &Default::default(), lag, controller);
+        self.handle_plugins_hot_reloading(dt, controller, lag, |_| {});
     }
 
     /// Tries to hot-reload dynamic plugins marked for reloading.
@@ -1580,7 +1613,7 @@ impl Engine {
     pub fn handle_plugins_hot_reloading<F>(
         &mut self,
         #[allow(unused_variables)] dt: f32,
-        #[allow(unused_variables)] window_target: &EventLoopWindowTarget<()>,
+        #[allow(unused_variables)] controller: ApplicationLoopController,
         #[allow(unused_variables)] lag: &mut f32,
         #[allow(unused_variables)] on_reloaded: F,
     ) where
@@ -1588,7 +1621,7 @@ impl Engine {
     {
         #[cfg(any(unix, windows))]
         {
-            if let Err(message) = self.reload_dynamic_plugins(dt, window_target, lag, on_reloaded) {
+            if let Err(message) = self.reload_dynamic_plugins(dt, controller, lag, on_reloaded) {
                 Log::err(format!(
                     "Unable to reload dynamic plugins. Reason: {message}"
                 ))
@@ -1600,7 +1633,7 @@ impl Engine {
         &mut self,
         dt: f32,
         lag: &mut f32,
-        window_target: &EventLoopWindowTarget<()>,
+        controller: ApplicationLoopController,
     ) {
         let len = self.async_scene_loader.loading_scenes.len();
         let mut n = 0;
@@ -1625,7 +1658,7 @@ impl Engine {
                             elapsed_time: self.elapsed_time,
                             script_processor: &self.script_processor,
                             async_scene_loader: &mut self.async_scene_loader,
-                            window_target: Some(window_target),
+                            loop_controller: controller,
                             task_pool: &mut self.task_pool,
                         };
 
@@ -1658,7 +1691,7 @@ impl Engine {
                     elapsed_time: self.elapsed_time,
                     script_processor: &self.script_processor,
                     async_scene_loader: &mut self.async_scene_loader,
-                    window_target: Some(window_target),
+                    loop_controller: controller,
                     task_pool: &mut self.task_pool,
                 };
 
@@ -1668,7 +1701,8 @@ impl Engine {
                             // Create a resource, that will point to the scene we've loaded the
                             // scene from and force scene nodes to inherit data from them.
                             let model = Resource::new_ok(
-                                ResourceKind::External(request.path.clone()),
+                                Uuid::new_v4(),
+                                ResourceKind::External,
                                 Model {
                                     mapping: NodeMapping::UseHandles,
                                     // We have to create a full copy of the scene, because otherwise
@@ -1685,11 +1719,10 @@ impl Engine {
                                 },
                             );
 
-                            Log::verify(self.resource_manager.register(
-                                model.clone().into_untyped(),
-                                request.path.clone(),
-                                |_, _| true,
-                            ));
+                            Log::verify(
+                                self.resource_manager
+                                    .register(model.clone().into_untyped(), request.path.clone()),
+                            );
 
                             for (handle, node) in scene.graph.pair_iter_mut() {
                                 node.set_inheritance_data(handle, model.clone());
@@ -1787,7 +1820,7 @@ impl Engine {
     pub fn pre_update(
         &mut self,
         dt: f32,
-        window_target: &EventLoopWindowTarget<()>,
+        controller: ApplicationLoopController,
         lag: &mut f32,
         switches: FxHashMap<Handle<Scene>, GraphUpdateSwitches>,
     ) {
@@ -1824,7 +1857,7 @@ impl Engine {
             );
         }
 
-        self.update_plugins(dt, window_target, lag);
+        self.update_plugins(dt, controller, lag);
         self.handle_scripts(dt);
     }
 
@@ -1837,7 +1870,7 @@ impl Engine {
         dt: f32,
         ui_update_switches: &UiUpdateSwitches,
         lag: &mut f32,
-        window_target: &EventLoopWindowTarget<()>,
+        controller: ApplicationLoopController,
     ) {
         if let GraphicsContext::Initialized(ref ctx) = self.graphics_context {
             let inner_size = ctx.window.inner_size();
@@ -1850,7 +1883,7 @@ impl Engine {
             self.performance_statistics.ui_time = instant::Instant::now() - time;
             self.elapsed_time += dt;
 
-            self.post_update_plugins(dt, window_target, lag);
+            self.post_update_plugins(dt, controller, lag);
         }
     }
 
@@ -1885,7 +1918,7 @@ impl Engine {
     fn handle_async_tasks(
         &mut self,
         dt: f32,
-        window_target: &EventLoopWindowTarget<()>,
+        controller: ApplicationLoopController,
         lag: &mut f32,
     ) {
         while let Some(result) = self.task_pool.inner().next_task_result() {
@@ -1907,7 +1940,7 @@ impl Engine {
                         elapsed_time: self.elapsed_time,
                         script_processor: &self.script_processor,
                         async_scene_loader: &mut self.async_scene_loader,
-                        window_target: Some(window_target),
+                        loop_controller: controller,
                         task_pool: &mut self.task_pool,
                     },
                 )
@@ -1975,17 +2008,12 @@ impl Engine {
         }
     }
 
-    fn update_plugins(
-        &mut self,
-        dt: f32,
-        window_target: &EventLoopWindowTarget<()>,
-        lag: &mut f32,
-    ) {
+    fn update_plugins(&mut self, dt: f32, controller: ApplicationLoopController, lag: &mut f32) {
         let time = instant::Instant::now();
 
         if self.plugins_enabled {
             // Handle asynchronous tasks first.
-            self.handle_async_tasks(dt, window_target, lag);
+            self.handle_async_tasks(dt, controller, lag);
 
             // Then update all the plugins.
             let mut context = PluginContext {
@@ -2001,7 +2029,7 @@ impl Engine {
                 elapsed_time: self.elapsed_time,
                 script_processor: &self.script_processor,
                 async_scene_loader: &mut self.async_scene_loader,
-                window_target: Some(window_target),
+                loop_controller: controller,
                 task_pool: &mut self.task_pool,
             };
 
@@ -2034,7 +2062,7 @@ impl Engine {
                         elapsed_time: self.elapsed_time,
                         script_processor: &self.script_processor,
                         async_scene_loader: &mut self.async_scene_loader,
-                        window_target: Some(window_target),
+                        loop_controller: controller,
                         task_pool: &mut self.task_pool,
                     };
 
@@ -2051,7 +2079,7 @@ impl Engine {
     fn post_update_plugins(
         &mut self,
         dt: f32,
-        window_target: &EventLoopWindowTarget<()>,
+        controller: ApplicationLoopController,
         lag: &mut f32,
     ) {
         let time = instant::Instant::now();
@@ -2070,7 +2098,7 @@ impl Engine {
                 elapsed_time: self.elapsed_time,
                 script_processor: &self.script_processor,
                 async_scene_loader: &mut self.async_scene_loader,
-                window_target: Some(window_target),
+                loop_controller: controller,
                 task_pool: &mut self.task_pool,
             };
 
@@ -2086,7 +2114,7 @@ impl Engine {
         &mut self,
         event: &Event<()>,
         dt: f32,
-        window_target: &EventLoopWindowTarget<()>,
+        controller: ApplicationLoopController,
         lag: &mut f32,
     ) {
         if self.plugins_enabled {
@@ -2106,7 +2134,7 @@ impl Engine {
                         elapsed_time: self.elapsed_time,
                         script_processor: &self.script_processor,
                         async_scene_loader: &mut self.async_scene_loader,
-                        window_target: Some(window_target),
+                        loop_controller: controller,
                         task_pool: &mut self.task_pool,
                     },
                 );
@@ -2117,7 +2145,7 @@ impl Engine {
     pub(crate) fn handle_graphics_context_created_by_plugins(
         &mut self,
         dt: f32,
-        window_target: &EventLoopWindowTarget<()>,
+        controller: ApplicationLoopController,
         lag: &mut f32,
     ) {
         if self.plugins_enabled {
@@ -2135,7 +2163,7 @@ impl Engine {
                     elapsed_time: self.elapsed_time,
                     script_processor: &self.script_processor,
                     async_scene_loader: &mut self.async_scene_loader,
-                    window_target: Some(window_target),
+                    loop_controller: controller,
                     task_pool: &mut self.task_pool,
                 });
             }
@@ -2145,7 +2173,7 @@ impl Engine {
     pub(crate) fn handle_graphics_context_destroyed_by_plugins(
         &mut self,
         dt: f32,
-        window_target: &EventLoopWindowTarget<()>,
+        controller: ApplicationLoopController,
         lag: &mut f32,
     ) {
         if self.plugins_enabled {
@@ -2163,7 +2191,7 @@ impl Engine {
                     elapsed_time: self.elapsed_time,
                     script_processor: &self.script_processor,
                     async_scene_loader: &mut self.async_scene_loader,
-                    window_target: Some(window_target),
+                    loop_controller: controller,
                     task_pool: &mut self.task_pool,
                 });
             }
@@ -2173,7 +2201,7 @@ impl Engine {
     pub(crate) fn handle_before_rendering_by_plugins(
         &mut self,
         dt: f32,
-        window_target: &EventLoopWindowTarget<()>,
+        controller: ApplicationLoopController,
         lag: &mut f32,
     ) {
         if self.plugins_enabled {
@@ -2191,7 +2219,7 @@ impl Engine {
                     elapsed_time: self.elapsed_time,
                     script_processor: &self.script_processor,
                     async_scene_loader: &mut self.async_scene_loader,
-                    window_target: Some(window_target),
+                    loop_controller: controller,
                     task_pool: &mut self.task_pool,
                 });
             }
@@ -2275,19 +2303,14 @@ impl Engine {
     #[inline]
     pub fn render(&mut self) -> Result<(), FrameworkError> {
         for ui in self.user_interfaces.iter_mut() {
+            ui.set_time(self.elapsed_time);
             ui.draw();
         }
 
         if let GraphicsContext::Initialized(ref mut ctx) = self.graphics_context {
-            // Process queued messages from scene nodes before rendering, this is mandatory to prevent
-            // "teleportation" bug (when an object is drawn at (0,0,0) for one frame and on the one
-            // draws where it should be).
-            for scene in self.scenes.iter_mut() {
-                scene.graph.process_node_messages(None);
-            }
-
             ctx.renderer.render_and_swap_buffers(
                 &self.scenes,
+                self.elapsed_time,
                 self.user_interfaces
                     .iter()
                     .map(|ui| ui.get_drawing_context()),
@@ -2303,7 +2326,7 @@ impl Engine {
         &mut self,
         scene_path: Option<&str>,
         enabled: bool,
-        window_target: Option<&EventLoopWindowTarget<()>>,
+        controller: ApplicationLoopController,
     ) {
         if self.plugins_enabled != enabled {
             self.plugins_enabled = enabled;
@@ -2326,7 +2349,7 @@ impl Engine {
                             elapsed_time: self.elapsed_time,
                             script_processor: &self.script_processor,
                             async_scene_loader: &mut self.async_scene_loader,
-                            window_target,
+                            loop_controller: controller,
                             task_pool: &mut self.task_pool,
                         },
                     );
@@ -2349,7 +2372,7 @@ impl Engine {
                         elapsed_time: self.elapsed_time,
                         script_processor: &self.script_processor,
                         async_scene_loader: &mut self.async_scene_loader,
-                        window_target,
+                        loop_controller: controller,
                         task_pool: &mut self.task_pool,
                     });
                 }
@@ -2439,7 +2462,7 @@ impl Engine {
         &mut self,
         plugin_index: usize,
         dt: f32,
-        window_target: &EventLoopWindowTarget<()>,
+        controller: ApplicationLoopController,
         lag: &mut f32,
     ) -> Result<(), String> {
         let plugin_container = &mut self.plugins[plugin_index];
@@ -2537,7 +2560,7 @@ impl Engine {
             let mut state = self.resource_manager.state();
             for resource in state.resources().iter() {
                 let data = resource.0.lock();
-                if let ResourceState::Ok(ref data) = data.state {
+                if let ResourceState::Ok { ref data, .. } = data.state {
                     data.as_reflect(&mut |reflect| {
                         if reflect.assembly_name() == plugin_assembly_name {
                             resources_to_reload.insert(resource.clone());
@@ -2548,8 +2571,8 @@ impl Engine {
 
             for resource_to_reload in resources_to_reload.iter() {
                 Log::info(format!(
-                    "Reloading {} resource, because it is used in plugin {plugin_assembly_name}",
-                    resource_to_reload.kind()
+                    "Reloading {:?} resource, because it is used in plugin {plugin_assembly_name}",
+                    state.resource_path(resource_to_reload)
                 ));
 
                 state.reload_resource(resource_to_reload.clone());
@@ -2654,7 +2677,7 @@ impl Engine {
             elapsed_time: self.elapsed_time,
             script_processor: &self.script_processor,
             async_scene_loader: &mut self.async_scene_loader,
-            window_target: Some(window_target),
+            loop_controller: controller,
             task_pool: &mut self.task_pool,
         });
 
@@ -2677,7 +2700,7 @@ impl Engine {
     pub fn reload_dynamic_plugins<F>(
         &mut self,
         dt: f32,
-        window_target: &EventLoopWindowTarget<()>,
+        controller: ApplicationLoopController,
         lag: &mut f32,
         mut on_reloaded: F,
     ) -> Result<(), String>
@@ -2687,7 +2710,7 @@ impl Engine {
         for plugin_index in 0..self.plugins.len() {
             if let PluginContainer::Dynamic(plugin) = &self.plugins[plugin_index] {
                 if plugin.is_reload_needed_now() {
-                    self.reload_plugin(plugin_index, dt, window_target, lag)?;
+                    self.reload_plugin(plugin_index, dt, controller, lag)?;
 
                     on_reloaded(self.plugins[plugin_index].deref_mut());
                 }
@@ -2714,13 +2737,19 @@ impl Drop for Engine {
         }
 
         // Finally disable plugins.
-        self.enable_plugins(None, false, None);
+        self.enable_plugins(
+            None,
+            false,
+            ApplicationLoopController::Headless {
+                running: &Default::default(),
+            },
+        );
     }
 }
 
 #[cfg(test)]
 mod test {
-
+    use crate::engine::ApplicationLoopController;
     use crate::{
         asset::manager::ResourceManager,
         core::{
@@ -2736,6 +2765,7 @@ mod test {
         },
     };
     use fyrox_ui::UiContainer;
+    use std::cell::Cell;
     use std::sync::{
         mpsc::{self, Sender, TryRecvError},
         Arc,
@@ -3152,15 +3182,6 @@ mod test {
     #[cfg(not(target_os = "macos"))] // This fails on macOS for some reason.
     fn test_async_script_tasks() {
         use crate::engine::{Engine, EngineInitParams};
-        use std::mem::{ManuallyDrop, MaybeUninit};
-        use winit::event_loop::EventLoop;
-        // This hack is needed, because tests run in random threads and EventLoop cannot be created
-        // from non-main thread. Since we don't create any windows and don't run an event loop, this
-        // should be safe.
-        #[allow(invalid_value)]
-        #[allow(clippy::uninit_assumed_init)]
-        let event_loop =
-            unsafe { ManuallyDrop::new(MaybeUninit::<EventLoop<()>>::uninit().assume_init()) };
 
         let task_pool = Arc::new(TaskPool::default());
         let mut engine = Engine::new(EngineInitParams {
@@ -3171,7 +3192,16 @@ mod test {
             task_pool,
         })
         .unwrap();
-        engine.enable_plugins(None, true, None);
+
+        let is_running = Cell::new(true);
+
+        engine.enable_plugins(
+            None,
+            true,
+            ApplicationLoopController::Headless {
+                running: &is_running,
+            },
+        );
 
         let mut scene = Scene::new();
 
@@ -3191,7 +3221,14 @@ mod test {
         let dt = 1.0 / 60.0;
         let mut lag = 0.0;
         while time <= 10.0 {
-            engine.update(dt, &event_loop, &mut lag, Default::default());
+            engine.update(
+                dt,
+                ApplicationLoopController::Headless {
+                    running: &is_running,
+                },
+                &mut lag,
+                Default::default(),
+            );
             time += dt;
         }
 

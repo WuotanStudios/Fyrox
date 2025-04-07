@@ -39,11 +39,14 @@ use crate::{
             message::{MessageDirection, MouseButton, UiMessage},
             numeric::{NumericUpDownBuilder, NumericUpDownMessage},
             stack_panel::StackPanelBuilder,
-            tab_control::{
-                Tab, TabControl, TabControlBuilder, TabControlMessage, TabDefinition, TabUserData,
-            },
+            style::{resource::StyleResourceExt, Style},
+            tab_control::{TabControl, TabControlBuilder, TabControlMessage, TabDefinition},
             text::{TextBuilder, TextMessage},
-            utils::make_simple_tooltip,
+            utils::{
+                make_dropdown_list_option, make_dropdown_list_option_universal,
+                make_dropdown_list_option_with_height, make_image_button_with_tooltip,
+                make_simple_tooltip,
+            },
             vec::{Vec3EditorBuilder, Vec3EditorMessage},
             widget::{WidgetBuilder, WidgetMessage},
             window::{WindowBuilder, WindowMessage, WindowTitle},
@@ -64,12 +67,7 @@ use crate::{
     DropdownListBuilder, GameScene, Message, Mode, SaveSceneConfirmationDialogAction,
     SceneContainer, Settings,
 };
-use fyrox::gui::style::resource::StyleResourceExt;
-use fyrox::gui::style::Style;
-use fyrox::gui::utils::{
-    make_dropdown_list_option, make_dropdown_list_option_universal,
-    make_dropdown_list_option_with_height, make_image_button_with_tooltip,
-};
+use fyrox::core::algebra::Vector2;
 use std::{
     ops::Deref,
     sync::mpsc::{self, Receiver},
@@ -281,6 +279,7 @@ pub struct SceneViewer {
     interaction_modes: FxHashMap<Uuid, Handle<UiNode>>,
     camera_projection: Handle<UiNode>,
     play: Handle<UiNode>,
+    build: Handle<UiNode>,
     stop: Handle<UiNode>,
     build_profile: Handle<UiNode>,
     sender: MessageSender,
@@ -305,6 +304,7 @@ impl SceneViewer {
         let selection_frame;
         let camera_projection;
         let play;
+        let build;
         let stop;
         let build_profile;
 
@@ -336,6 +336,7 @@ impl SceneViewer {
                         make_dropdown_list_option_with_height(ctx, "3D", 22.0),
                         make_dropdown_list_option_with_height(ctx, "2D", 22.0),
                     ])
+                    .with_close_on_selection(true)
                     .with_selected(0)
                     .build(ctx);
                     camera_projection
@@ -375,6 +376,10 @@ impl SceneViewer {
         .with_orientation(Orientation::Horizontal)
         .build(ctx);
 
+        let build_tooltip = "Build Project.\nBuilds the game, but does not run it. Could be \
+        useful for hot reloading - change the source code and then press this button. The new version \
+        of the game DLL will be built and automagically loaded by the editor and the running game.";
+
         let top_ribbon = GridBuilder::new(
             WidgetBuilder::new()
                 .with_child(interaction_mode_panel)
@@ -410,7 +415,8 @@ impl SceneViewer {
                                 play = ButtonBuilder::new(
                                     WidgetBuilder::new()
                                         .with_margin(Thickness::uniform(1.0))
-                                        .with_width(26.0),
+                                        .with_width(26.0)
+                                        .with_tooltip(make_simple_tooltip(ctx, "Play")),
                                 )
                                 .with_content(
                                     ImageBuilder::new(
@@ -427,6 +433,29 @@ impl SceneViewer {
                                 )
                                 .build(ctx);
                                 play
+                            })
+                            .with_child({
+                                build = ButtonBuilder::new(
+                                    WidgetBuilder::new()
+                                        .with_margin(Thickness::uniform(1.0))
+                                        .with_width(26.0)
+                                        .with_tooltip(make_simple_tooltip(ctx, build_tooltip)),
+                                )
+                                .with_content(
+                                    ImageBuilder::new(
+                                        WidgetBuilder::new()
+                                            .with_width(16.0)
+                                            .with_height(16.0)
+                                            .with_margin(Thickness::uniform(4.0))
+                                            .with_background(
+                                                Brush::Solid(Color::opaque(0, 200, 0)).into(),
+                                            ),
+                                    )
+                                    .with_opt_texture(load_image!("../../resources/hammer.png"))
+                                    .build(ctx),
+                                )
+                                .build(ctx);
+                                build
                             })
                             .with_child({
                                 stop = ButtonBuilder::new(
@@ -493,11 +522,13 @@ impl SceneViewer {
             .with_content(
                 GridBuilder::new(
                     WidgetBuilder::new()
+                        .with_min_size(Vector2::new(0.0, 21.0))
                         .on_row(0)
                         .with_child(top_ribbon)
                         .with_child({
-                            tab_control =
-                                TabControlBuilder::new(WidgetBuilder::new().on_row(1)).build(ctx);
+                            tab_control = TabControlBuilder::new(WidgetBuilder::new().on_row(1))
+                                .with_tab_drag(true)
+                                .build(ctx);
                             tab_control
                         })
                         .with_child(
@@ -544,12 +575,13 @@ impl SceneViewer {
                         ),
                 )
                 .add_row(Row::strict(30.0))
-                .add_row(Row::strict(21.0))
+                .add_row(Row::auto())
                 .add_row(Row::stretch())
                 .add_column(Column::stretch())
                 .build(ctx),
             )
             .with_title(WindowTitle::text("Scene Preview"))
+            .with_tab_label("Scene")
             .build(ctx);
         Self {
             sender,
@@ -570,18 +602,9 @@ impl SceneViewer {
             scene_gizmo_image,
             debug_switches,
             grid_snap_menu,
+            build,
         }
     }
-}
-
-fn fetch_tab_id(tab: &Tab) -> Uuid {
-    tab.user_data
-        .as_ref()
-        .unwrap()
-        .0
-        .downcast_ref::<Uuid>()
-        .cloned()
-        .unwrap()
 }
 
 impl SceneViewer {
@@ -716,7 +739,13 @@ impl SceneViewer {
             }
 
             if message.destination() == self.play {
-                self.sender.send(Message::SwitchToBuildMode);
+                self.sender.send(Message::SwitchToBuildMode {
+                    play_after_build: true,
+                });
+            } else if message.destination() == self.build {
+                self.sender.send(Message::SwitchToBuildMode {
+                    play_after_build: false,
+                });
             } else if message.destination() == self.stop {
                 self.sender.send(Message::SwitchToEditMode);
             }
@@ -772,38 +801,20 @@ impl SceneViewer {
             {
                 match msg {
                     TabControlMessage::CloseTabByUuid(uuid) => {
-                        if let Some(tab_id) = ui
-                            .node(self.tab_control)
-                            .component_ref::<TabControl>()
-                            .expect("Must be TabControl!")
-                            .get_tab_by_uuid(*uuid)
-                            .map(fetch_tab_id)
-                        {
-                            if let Some(entry) = scenes.entry_by_scene_id(tab_id) {
-                                if entry.need_save() {
-                                    self.sender.send(Message::OpenSaveSceneConfirmationDialog {
-                                        id: entry.id,
-                                        action: SaveSceneConfirmationDialogAction::CloseScene(
-                                            entry.id,
-                                        ),
-                                    });
-                                } else {
-                                    self.sender.send(Message::CloseScene(entry.id));
-                                }
+                        if let Some(entry) = scenes.entry_by_scene_id(*uuid) {
+                            if entry.need_save() {
+                                self.sender.send(Message::OpenSaveSceneConfirmationDialog {
+                                    id: entry.id,
+                                    action: SaveSceneConfirmationDialogAction::CloseScene(entry.id),
+                                });
+                            } else {
+                                self.sender.send(Message::CloseScene(entry.id));
                             }
                         }
                     }
                     TabControlMessage::ActiveTabUuid(Some(uuid)) => {
-                        let tab_id = ui
-                            .node(self.tab_control)
-                            .component_ref::<TabControl>()
-                            .expect("Must be TabControl!")
-                            .get_tab_by_uuid(*uuid)
-                            .map(fetch_tab_id);
-                        if let Some(tab_id) = tab_id {
-                            if let Some(entry) = scenes.entry_by_scene_id(tab_id) {
-                                self.sender.send(Message::SetCurrentScene(entry.id));
-                            }
+                        if let Some(entry) = scenes.entry_by_scene_id(*uuid) {
+                            self.sender.send(Message::SetCurrentScene(entry.id));
                         }
                     }
                     _ => (),
@@ -844,8 +855,11 @@ impl SceneViewer {
                                 message.set_handled(true);
                             }
                         }
+                        WidgetMessage::MouseEnter => {
+                            entry.on_mouse_enter(screen_bounds, engine, settings);
+                        }
                         WidgetMessage::MouseLeave => {
-                            entry.on_mouse_leave(engine, settings);
+                            entry.on_mouse_leave(screen_bounds, engine, settings);
                         }
                         WidgetMessage::DragOver(handle) => {
                             entry.on_drag_over(handle, screen_bounds, engine, settings);
@@ -950,8 +964,7 @@ impl SceneViewer {
             .clone();
         // Remove any excess tabs.
         for tab in tabs.iter() {
-            let tab_scene = fetch_tab_id(tab);
-            if scenes.iter().all(|s| tab_scene != s.id) {
+            if scenes.iter().all(|s| tab.uuid != s.id) {
                 send_sync_message(
                     engine.user_interfaces.first(),
                     TabControlMessage::remove_tab_by_uuid(
@@ -964,7 +977,7 @@ impl SceneViewer {
         }
         // Add any missing tabs.
         for entry in scenes.iter() {
-            if tabs.iter().all(|tab| fetch_tab_id(tab) != entry.id) {
+            if tabs.iter().all(|tab| tab.uuid != entry.id) {
                 let header = TextBuilder::new(WidgetBuilder::new().with_margin(Thickness {
                     left: 4.0,
                     top: 2.0,
@@ -976,21 +989,22 @@ impl SceneViewer {
 
                 send_sync_message(
                     engine.user_interfaces.first(),
-                    TabControlMessage::add_tab(
+                    TabControlMessage::add_tab_with_uuid(
                         self.tab_control,
                         MessageDirection::ToWidget,
+                        entry.id,
                         TabDefinition {
                             header,
                             content: Default::default(),
                             can_be_closed: true,
-                            user_data: Some(TabUserData::new(entry.id)),
+                            user_data: None,
                         },
                     ),
                 );
             }
         }
         for tab in tabs.iter() {
-            if let Some(scene) = scenes.entry_by_scene_id(fetch_tab_id(tab)) {
+            if let Some(scene) = scenes.entry_by_scene_id(tab.uuid) {
                 engine
                     .user_interfaces
                     .first_mut()
@@ -1006,34 +1020,14 @@ impl SceneViewer {
             }
         }
 
-        match scenes.current_scene_entry_ref().map(|e| e.id) {
-            Some(scene_uuid) => {
-                // Try to find the tab for the current scene.
-                // If we cannot find it, do nothing because the correct tab will be activated elsewhere.
-                if let Some(tab_uuid) = tabs
-                    .iter()
-                    .find(|t| fetch_tab_id(t) == scene_uuid)
-                    .map(|t| t.uuid)
-                {
-                    send_sync_message(
-                        engine.user_interfaces.first(),
-                        TabControlMessage::active_tab_uuid(
-                            self.tab_control,
-                            MessageDirection::ToWidget,
-                            Some(tab_uuid),
-                        ),
-                    )
-                }
-            }
-            None => send_sync_message(
-                engine.user_interfaces.first(),
-                TabControlMessage::active_tab_uuid(
-                    self.tab_control,
-                    MessageDirection::ToWidget,
-                    None,
-                ),
+        send_sync_message(
+            engine.user_interfaces.first(),
+            TabControlMessage::active_tab_uuid(
+                self.tab_control,
+                MessageDirection::ToWidget,
+                scenes.current_scene_entry_ref().map(|e| e.id),
             ),
-        }
+        );
 
         // Then sync to the current scene.
         if let Some(entry) = scenes.current_scene_entry_ref() {
@@ -1114,7 +1108,7 @@ impl SceneViewer {
         ui.send_message(ImageMessage::texture(
             self.frame,
             MessageDirection::ToWidget,
-            render_target.map(Into::into),
+            render_target,
         ));
     }
 

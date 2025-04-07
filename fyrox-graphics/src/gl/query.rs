@@ -18,13 +18,12 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-use crate::gl::server::GlGraphicsServer;
 use crate::{
     error::FrameworkError,
-    query::{Query, QueryKind, QueryResult},
+    gl::server::GlGraphicsServer,
+    query::{GpuQueryTrait, QueryKind, QueryResult},
 };
 use glow::HasContext;
-use std::any::Any;
 use std::{cell::Cell, rc::Weak};
 
 #[derive(Debug)]
@@ -50,15 +49,7 @@ impl GlQuery {
     }
 }
 
-impl Query for GlQuery {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-
+impl GpuQueryTrait for GlQuery {
     fn begin(&self, kind: QueryKind) {
         if let Some(pipeline_state) = self.pipeline_state.upgrade() {
             unsafe {
@@ -77,6 +68,10 @@ impl Query for GlQuery {
                 }
             }
         }
+    }
+
+    fn is_started(&self) -> bool {
+        self.active_query.get().is_some()
     }
 
     fn try_get_result(&self) -> Option<QueryResult> {

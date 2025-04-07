@@ -21,7 +21,7 @@
 use crate::{
     command::{Command, CommandGroup, SetPropertyCommand},
     fyrox::{
-        core::{algebra::Vector3, pool::Handle, reflect::Reflect},
+        core::{algebra::Vector3, pool::Handle, reflect::Reflect, TypeUuidProvider},
         engine::Engine,
         graph::{BaseSceneGraph, SceneGraph},
         gui::{
@@ -30,8 +30,7 @@ use crate::{
             stack_panel::StackPanelBuilder,
             utils::make_simple_tooltip,
             widget::{WidgetBuilder, WidgetMessage},
-            window::{WindowBuilder, WindowMessage, WindowTitle},
-            BuildContext, HorizontalAlignment, Thickness, UiNode, UserInterface, VerticalAlignment,
+            BuildContext, HorizontalAlignment, Orientation, UiNode, UserInterface,
         },
         scene::{
             collider::{Collider, ColliderShape},
@@ -39,13 +38,15 @@ use crate::{
         },
     },
     message::MessageSender,
+    plugins::collider::ColliderShapeInteractionMode,
     scene::{commands::GameSceneContext, GameScene, Selection},
+    Message,
 };
 
 pub struct ColliderControlPanel {
-    pub window: Handle<UiNode>,
+    pub root_widget: Handle<UiNode>,
     fit: Handle<UiNode>,
-    scene_frame: Handle<UiNode>,
+    edit: Handle<UiNode>,
 }
 
 fn set_property<T: Reflect>(
@@ -67,63 +68,54 @@ fn set_property<T: Reflect>(
 }
 
 impl ColliderControlPanel {
-    pub fn new(scene_frame: Handle<UiNode>, ctx: &mut BuildContext) -> Self {
-        let tooltip = "Tries to calculate the new collider shape parameters (half extents,\
+    pub fn new(ctx: &mut BuildContext) -> Self {
+        let try_fit_tooltip = "Tries to calculate the new collider shape parameters (half extents,\
         radius, etc.) using bounding boxes of descendant nodes of the parent rigid body. This \
         operation performed in world-space coordinates.";
 
+        let edit_tooltip = "Enables the shape editing interaction mode, that allows you to \
+        edit the shape in-scene.";
+
         let fit;
-        let window = WindowBuilder::new(
+        let edit;
+        let root_widget = StackPanelBuilder::new(
             WidgetBuilder::new()
-                .with_width(250.0)
-                .with_height(50.0)
-                .with_name("ColliderControlPanel"),
+                .with_horizontal_alignment(HorizontalAlignment::Right)
+                .with_child({
+                    fit = ButtonBuilder::new(
+                        WidgetBuilder::new()
+                            .with_width(80.0)
+                            .with_height(24.0)
+                            .with_tooltip(make_simple_tooltip(ctx, try_fit_tooltip)),
+                    )
+                    .with_text("Try Fit")
+                    .build(ctx);
+                    fit
+                })
+                .with_child({
+                    edit = ButtonBuilder::new(
+                        WidgetBuilder::new()
+                            .with_width(80.0)
+                            .with_height(24.0)
+                            .with_tooltip(make_simple_tooltip(ctx, edit_tooltip)),
+                    )
+                    .with_text("Edit")
+                    .build(ctx);
+                    edit
+                }),
         )
-        .open(false)
-        .with_title(WindowTitle::text("Collider Control Panel"))
-        .with_content(
-            StackPanelBuilder::new(
-                WidgetBuilder::new()
-                    .with_horizontal_alignment(HorizontalAlignment::Right)
-                    .with_child({
-                        fit = ButtonBuilder::new(
-                            WidgetBuilder::new()
-                                .with_width(80.0)
-                                .with_height(24.0)
-                                .with_tooltip(make_simple_tooltip(ctx, tooltip)),
-                        )
-                        .with_text("Try Fit")
-                        .build(ctx);
-                        fit
-                    }),
-            )
-            .build(ctx),
-        )
+        .with_orientation(Orientation::Horizontal)
         .build(ctx);
-
         Self {
-            window,
+            root_widget,
             fit,
-            scene_frame,
+            edit,
         }
-    }
-
-    pub fn open(&self, ui: &UserInterface) {
-        ui.send_message(WindowMessage::open_and_align(
-            self.window,
-            MessageDirection::ToWidget,
-            self.scene_frame,
-            HorizontalAlignment::Right,
-            VerticalAlignment::Top,
-            Thickness::uniform(1.0),
-            false,
-            false,
-        ));
     }
 
     pub fn destroy(self, ui: &UserInterface) {
         ui.send_message(WidgetMessage::remove(
-            self.window,
+            self.root_widget,
             MessageDirection::ToWidget,
         ));
     }
@@ -242,6 +234,10 @@ impl ColliderControlPanel {
             if !commands.is_empty() {
                 sender.do_command(CommandGroup::from(commands));
             }
+        } else if message.destination() == self.edit {
+            sender.send(Message::SetInteractionMode(
+                ColliderShapeInteractionMode::type_uuid(),
+            ));
         }
     }
 }

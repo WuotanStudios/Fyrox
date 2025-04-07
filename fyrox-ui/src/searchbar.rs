@@ -47,6 +47,7 @@ use crate::{
     BuildContext, Control, HorizontalAlignment, Thickness, UiNode, UserInterface,
     VerticalAlignment,
 };
+
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
 use std::ops::{Deref, DerefMut};
 
@@ -100,6 +101,7 @@ impl SearchBarMessage {
 /// }
 /// ```
 #[derive(Default, Clone, Visit, Reflect, Debug, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct SearchBar {
     /// Base widget of the search bar.
     pub widget: Widget,
@@ -204,7 +206,7 @@ impl SearchBarBuilder {
                                         .with_vertical_alignment(VerticalAlignment::Center)
                                         .with_foreground(ctx.style.property(Style::BRUSH_BRIGHT))
                                         .with_margin(Thickness {
-                                            left: 2.0,
+                                            left: 4.0,
                                             top: 2.0,
                                             right: 0.0,
                                             bottom: 0.0,

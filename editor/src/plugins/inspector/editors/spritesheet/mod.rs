@@ -43,6 +43,7 @@ use crate::fyrox::{
     scene::animation::spritesheet::prelude::*,
 };
 use crate::plugins::inspector::editors::spritesheet::window::SpriteSheetFramesEditorWindow;
+
 use std::{
     any::TypeId,
     ops::{Deref, DerefMut},
@@ -63,6 +64,7 @@ impl SpriteSheetFramesPropertyEditorMessage {
 }
 
 #[derive(Clone, Debug, Reflect, Visit, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct SpriteSheetFramesPropertyEditor {
     widget: Widget,
     edit_button: Handle<UiNode>,
@@ -181,7 +183,7 @@ impl PropertyEditorDefinition for SpriteSheetFramesContainerEditorDefinition {
             {
                 return Some(PropertyChanged {
                     name: ctx.name.to_string(),
-                    owner_type_id: ctx.owner_type_id,
+
                     value: FieldKind::object(container.clone()),
                 });
             }

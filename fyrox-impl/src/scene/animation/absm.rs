@@ -218,6 +218,7 @@ impl LayerMaskExt for LayerMask {
 /// }
 /// ```
 #[derive(Visit, Reflect, Clone, Debug, Default, ComponentProvider)]
+#[reflect(derived_type = "Node")]
 pub struct AnimationBlendingStateMachine {
     base: Base,
     #[component(include)]

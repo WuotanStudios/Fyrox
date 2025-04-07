@@ -32,6 +32,7 @@ use crate::{
     widget::{Widget, WidgetBuilder, WidgetMessage},
     BuildContext, Control, Thickness, UiNode, UserInterface,
 };
+
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
 use std::ops::{Deref, DerefMut};
 
@@ -66,6 +67,7 @@ impl SelectorMessage {
 }
 
 #[derive(Default, Clone, Visit, Reflect, Debug, ComponentProvider, TypeUuidProvider)]
+#[reflect(derived_type = "UiNode")]
 #[type_uuid(id = "25118853-5c3c-4197-9e4b-2e3b9d92f4d2")]
 pub struct Selector {
     widget: Widget,
@@ -138,7 +140,7 @@ impl Control for Selector {
                         ui.send_message(WidgetMessage::visibility(
                             *item,
                             MessageDirection::ToWidget,
-                            self.current.map_or(false, |current| current == i),
+                            *self.current == Some(i),
                         ));
                     }
                 }
@@ -215,7 +217,7 @@ impl SelectorBuilder {
 
     pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
         for (i, item) in self.items.iter().enumerate() {
-            ctx[*item].set_visibility(self.current.map_or(false, |current| current == i));
+            ctx[*item].set_visibility(self.current == Some(i));
         }
 
         let prev;

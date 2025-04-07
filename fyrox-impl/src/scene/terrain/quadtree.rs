@@ -316,7 +316,7 @@ impl QuadTreeNode {
 
         let aabb = self.aabb(transform, height_map_size, physical_size);
 
-        if !frustum.map_or(true, |f| f.is_intersects_aabb(&aabb))
+        if !frustum.is_none_or(|f| f.is_intersects_aabb(&aabb))
             || !aabb.is_intersects_sphere(camera_position, radius)
         {
             // This node is out of range, so add nothing to `selection` and return.
@@ -330,9 +330,7 @@ impl QuadTreeNode {
         // then we are at the maximum LOD and the children of this node are to be ignored.
         if level_ranges
             .get(current_level + 1)
-            .map_or(false, |next_range| {
-                aabb.is_intersects_sphere(camera_position, *next_range)
-            })
+            .is_some_and(|next_range| aabb.is_intersects_sphere(camera_position, *next_range))
         {
             // We are close enough to the camera that we need to try to render a higher LOD,
             // so examine the children of this node, if any.

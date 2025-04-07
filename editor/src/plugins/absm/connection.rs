@@ -34,12 +34,14 @@ use crate::fyrox::{
 };
 use crate::plugins::absm::segment::Segment;
 use crate::utils::fetch_node_screen_center;
+
 use std::ops::{Deref, DerefMut};
 
 const PICKED_BRUSH: Brush = Brush::Solid(Color::opaque(100, 100, 100));
 const NORMAL_BRUSH: Brush = Brush::Solid(Color::opaque(80, 80, 80));
 
 #[derive(Debug, Clone, Visit, Reflect, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct Connection {
     widget: Widget,
     pub segment: Segment,

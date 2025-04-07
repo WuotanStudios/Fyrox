@@ -32,6 +32,7 @@ use crate::{
     widget::WidgetBuilder,
     BuildContext, Control, Thickness, UiNode, UserInterface, Widget,
 };
+
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
 use std::ops::{Deref, DerefMut};
 
@@ -95,6 +96,7 @@ where
 }
 
 #[derive(Clone, Visit, Reflect, Debug, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct VecEditor<T, const D: usize>
 where
     T: NumericType,

@@ -19,15 +19,17 @@
 // SOFTWARE.
 
 use crate::{
-    buffer::{Buffer, BufferKind},
+    buffer::{BufferKind, GpuBufferTrait},
     core::{array_as_u8_slice, math::TriangleDefinition},
     error::FrameworkError,
-    geometry_buffer::{AttributeKind, GeometryBuffer, GeometryBufferDescriptor},
+    geometry_buffer::{
+        AttributeKind, ElementsDescriptor, GeometryBufferDescriptor, GpuGeometryBufferTrait,
+    },
     gl::{buffer::GlBuffer, server::GlGraphicsServer, ToGlConstant},
     ElementKind,
 };
 use glow::HasContext;
-use std::{any::Any, cell::Cell, marker::PhantomData, rc::Weak};
+use std::{cell::Cell, marker::PhantomData, rc::Weak};
 
 impl AttributeKind {
     fn gl_type(self) -> u32 {
@@ -61,6 +63,16 @@ impl GlGeometryBuffer {
         server.set_vertex_array_object(Some(vao));
 
         let element_buffer = GlBuffer::new(server, 0, BufferKind::Index, desc.usage)?;
+
+        let (element_count, data) = match desc.elements {
+            ElementsDescriptor::Triangles(triangles) => {
+                (triangles.len(), array_as_u8_slice(triangles))
+            }
+            ElementsDescriptor::Lines(lines) => (lines.len(), array_as_u8_slice(lines)),
+            ElementsDescriptor::Points(points) => (points.len(), array_as_u8_slice(points)),
+        };
+
+        element_buffer.write_data(data)?;
 
         let mut buffers = Vec::new();
         for buffer in desc.buffers {
@@ -110,8 +122,8 @@ impl GlGeometryBuffer {
             vertex_array_object: vao,
             buffers,
             element_buffer,
-            element_count: Cell::new(0),
-            element_kind: desc.element_kind,
+            element_count: Cell::new(element_count),
+            element_kind: desc.elements.element_kind(),
             thread_mark: PhantomData,
         })
     }
@@ -133,15 +145,7 @@ impl GlGeometryBuffer {
     }
 }
 
-impl GeometryBuffer for GlGeometryBuffer {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-
+impl GpuGeometryBufferTrait for GlGeometryBuffer {
     fn set_buffer_data(&self, buffer: usize, data: &[u8]) {
         self.state
             .upgrade()
@@ -166,6 +170,12 @@ impl GeometryBuffer for GlGeometryBuffer {
         assert_eq!(self.element_kind, ElementKind::Line);
         self.element_count.set(lines.len());
         self.set_elements(array_as_u8_slice(lines));
+    }
+
+    fn set_points(&self, points: &[u32]) {
+        assert_eq!(self.element_kind, ElementKind::Point);
+        self.element_count.set(points.len());
+        self.set_elements(array_as_u8_slice(points));
     }
 }
 

@@ -22,7 +22,7 @@ use crate::{
     project::ProjectWizard,
     settings::{Project, Settings, SettingsWindow, MANIFEST_PATH_VAR},
     upgrade::UpgradeTool,
-    utils::{self, is_production_ready, load_image},
+    utils::{self, is_production_ready},
 };
 use fyrox::{
     core::{color::Color, log::Log, pool::Handle, some_or_return},
@@ -46,7 +46,7 @@ use fyrox::{
         style::{resource::StyleResourceExt, Style},
         text::{TextBuilder, TextMessage},
         utils::{
-            make_image_button_with_tooltip, make_simple_tooltip,
+            load_image, make_image_button_with_tooltip, make_simple_tooltip,
             make_text_and_image_button_with_tooltip,
         },
         widget::{WidgetBuilder, WidgetMessage},
@@ -138,6 +138,7 @@ pub struct ProjectManager {
     upgrade: Handle<UiNode>,
     locate: Handle<UiNode>,
     open_settings: Handle<UiNode>,
+    open_help: Handle<UiNode>,
     open_ide: Handle<UiNode>,
     upgrade_tool: Option<UpgradeTool>,
     settings_window: Option<SettingsWindow>,
@@ -190,10 +191,32 @@ fn make_project_item(
     .with_text(engine_version)
     .build(ctx);
 
+    let project_size = if let Some(project_dir) = Path::new(path).parent() {
+        let size = utils::calculate_directory_size(project_dir);
+        utils::format_size(size)
+    } else {
+        String::from("N/A")
+    };
+
+    let size_text = TextBuilder::new(
+        WidgetBuilder::new()
+            .with_foreground(ctx.style.property(Style::BRUSH_BRIGHTEST))
+            .with_margin(Thickness {
+                left: 0.0,
+                top: 6.0,
+                right: 8.0,
+                bottom: 0.0,
+            }),
+    )
+    .with_font_size(13.0.into())
+    .with_text(format!("Size: {}", project_size))
+    .build(ctx);
+
     let info = StackPanelBuilder::new(
         WidgetBuilder::new()
             .with_horizontal_alignment(HorizontalAlignment::Right)
             .with_vertical_alignment(VerticalAlignment::Center)
+            .with_child(size_text)
             .with_child(engine_version)
             .with_child(hot_reload),
     )
@@ -380,6 +403,16 @@ impl ProjectManager {
         );
         ctx[open_settings].set_column(3);
 
+        let open_help = make_image_button_with_tooltip(
+            ctx,
+            18.0,
+            18.0,
+            load_image(include_bytes!("../resources/question.png")),
+            "Help\nHotkey: F1",
+            Some(8),
+        );
+        ctx[open_help].set_column(4);
+
         let message_count;
         let open_log = ButtonBuilder::new(WidgetBuilder::new().on_column(4).with_visibility(false))
             .with_content(
@@ -427,11 +460,13 @@ impl ProjectManager {
                 .with_child(import)
                 .with_child(search_bar)
                 .with_child(open_settings)
+                .with_child(open_help)
                 .with_child(open_log),
         )
         .add_column(Column::auto())
         .add_column(Column::auto())
         .add_column(Column::stretch())
+        .add_column(Column::auto())
         .add_column(Column::auto())
         .add_column(Column::auto())
         .add_row(Row::auto())
@@ -682,6 +717,7 @@ impl ProjectManager {
             upgrade,
             locate,
             open_settings,
+            open_help,
             open_ide,
             upgrade_tool: None,
             settings_window: None,
@@ -892,6 +928,12 @@ impl ProjectManager {
         ));
     }
 
+    fn on_open_help_clicked(&mut self) {
+        Log::verify(open::that_detached(
+            "https://fyrox-book.github.io/beginning/project_manager.html",
+        ));
+    }
+
     fn on_upgrade_clicked(&mut self, ui: &mut UserInterface) {
         let project = some_or_return!(self.selection.and_then(|i| self.settings.projects.get(i)));
         let ctx = &mut ui.build_ctx();
@@ -972,6 +1014,8 @@ impl ProjectManager {
             self.on_exclude_project_clicked(ui);
         } else if button == self.clean_project {
             self.on_clean_clicked(ui);
+        } else if button == self.open_help {
+            self.on_open_help_clicked();
         }
     }
 
@@ -1075,6 +1119,7 @@ impl ProjectManager {
             KeyCode::KeyS if modifiers.control => self.on_open_settings_click(ui),
             KeyCode::KeyE if modifiers.control => self.on_exclude_project_clicked(ui),
             KeyCode::KeyN if modifiers.control => self.on_clean_clicked(ui),
+            KeyCode::F1 => self.on_open_help_clicked(),
             _ => (),
         }
     }

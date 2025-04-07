@@ -37,6 +37,7 @@ use crate::{
     window::{WindowBuilder, WindowMessage, WindowTitle},
     BuildContext, Control, HorizontalAlignment, Orientation, Thickness, UiNode, UserInterface,
 };
+
 use fyrox_core::uuid_provider;
 use fyrox_graph::BaseSceneGraph;
 use std::{
@@ -56,6 +57,7 @@ pub struct FolderNameDialog {
 }
 
 #[derive(Clone, Visit, Reflect, Debug, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct ItemContextMenu {
     #[component(include)]
     pub base_menu: ContextMenu,

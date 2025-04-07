@@ -49,7 +49,7 @@ use crate::{
             Mesh,
         },
         node::{Node, NodeTrait},
-        rigidbody::{self, ApplyAction},
+        rigidbody::{self, ApplyAction, RigidBodyMassPropertiesType},
         terrain::{Chunk, Terrain},
     },
     utils::raw_mesh::{RawMeshBuilder, RawVertex},
@@ -66,7 +66,7 @@ use rapier3d::{
     },
     parry::{query::ShapeCastOptions, shape::HeightField},
     pipeline::{DebugRenderPipeline, EventHandler, PhysicsPipeline, QueryPipeline},
-    prelude::{HeightFieldCellStatus, JointAxis},
+    prelude::{HeightFieldCellStatus, JointAxis, MassProperties},
 };
 use std::{
     cell::{Cell, RefCell},
@@ -469,7 +469,7 @@ fn make_trimesh(
     owner: Handle<Node>,
     sources: &[GeometrySource],
     nodes: &NodePool,
-) -> SharedShape {
+) -> Option<SharedShape> {
     let mut mesh_builder = RawMeshBuilder::new(0, 0);
 
     // Create inverse transform that will discard rotation and translation, but leave scaling and
@@ -554,9 +554,9 @@ fn make_trimesh(
             ),
         );
 
-        SharedShape::trimesh(vec![Point3::new(0.0, 0.0, 0.0)], vec![[0, 0, 0]])
+        SharedShape::trimesh(vec![Point3::new(0.0, 0.0, 0.0)], vec![[0, 0, 0]]).ok()
     } else {
-        SharedShape::trimesh(vertices, indices)
+        SharedShape::trimesh(vertices, indices).ok()
     }
 }
 
@@ -756,12 +756,12 @@ fn collider_shape_into_native_shape(
             if trimesh.sources.is_empty() {
                 None
             } else {
-                Some(make_trimesh(
+                make_trimesh(
                     owner_inv_global_transform,
                     owner_collider,
                     &trimesh.sources,
                     pool,
-                ))
+                )
             }
         }
         ColliderShape::Heightfield(heightfield) => pool
@@ -1162,6 +1162,8 @@ impl PhysicsWorld {
                 max_ccd_substeps: self.integration_parameters.max_ccd_substeps as usize,
             };
 
+            let mut query = self.query.borrow_mut();
+
             self.pipeline.step(
                 &self.gravity,
                 &integration_parameters,
@@ -1173,9 +1175,7 @@ impl PhysicsWorld {
                 &mut self.joints.set,
                 &mut self.multibody_joints.set,
                 &mut self.ccd_solver,
-                // In Rapier 0.17 passing query pipeline here sometimes causing panic in numeric overflow,
-                // so we keep updating it manually.
-                None,
+                Some(&mut query),
                 &(),
                 &*self.event_handler,
             );
@@ -1252,14 +1252,7 @@ impl PhysicsWorld {
     pub fn cast_ray<S: QueryResultsStorage>(&self, opts: RayCastOptions, query_buffer: &mut S) {
         let time = instant::Instant::now();
 
-        let mut query = self.query.borrow_mut();
-
-        // TODO: Ideally this must be called once per frame, but it seems to be impossible because
-        // a body can be deleted during the consecutive calls of this method which will most
-        // likely end up in panic because of invalid handle stored in internal acceleration
-        // structure. This could be fixed by delaying deleting of bodies/collider to the end
-        // of the frame.
-        query.update(&self.colliders);
+        let query = self.query.borrow_mut();
 
         query_buffer.clear();
         let ray = Ray::new(
@@ -1423,7 +1416,7 @@ impl PhysicsWorld {
     ) {
         if *self.enabled {
             if let Some(native) = self.bodies.get(rigid_body.native.get()) {
-                if native.body_type() == RigidBodyType::Dynamic {
+                if native.body_type() != RigidBodyType::Fixed {
                     let local_transform: Matrix4<f32> = parent_transform
                         .try_inverse()
                         .unwrap_or_else(Matrix4::identity)
@@ -1495,9 +1488,46 @@ impl PhysicsWorld {
                     rigid_body_node
                         .ang_vel
                         .try_sync_model(|v| native.set_angvel(v, false));
-                    rigid_body_node
-                        .mass
-                        .try_sync_model(|v| native.set_additional_mass(v, true));
+                    rigid_body_node.mass.try_sync_model(|v| {
+                        match *rigid_body_node.mass_properties_type {
+                            RigidBodyMassPropertiesType::Default => {
+                                native.set_additional_mass(v, false);
+                            }
+                            RigidBodyMassPropertiesType::Additional {
+                                center_of_mass,
+                                principal_inertia,
+                            } => {
+                                native.set_additional_mass_properties(
+                                    MassProperties::new(
+                                        Point3::from(center_of_mass),
+                                        v,
+                                        principal_inertia,
+                                    ),
+                                    false,
+                                );
+                            }
+                        };
+                    });
+                    rigid_body_node.mass_properties_type.try_sync_model(|v| {
+                        match v {
+                            RigidBodyMassPropertiesType::Default => {
+                                native.set_additional_mass(*rigid_body_node.mass, false);
+                            }
+                            RigidBodyMassPropertiesType::Additional {
+                                center_of_mass,
+                                principal_inertia,
+                            } => {
+                                native.set_additional_mass_properties(
+                                    MassProperties::new(
+                                        Point3::from(center_of_mass),
+                                        *rigid_body_node.mass,
+                                        principal_inertia,
+                                    ),
+                                    false,
+                                );
+                            }
+                        };
+                    });
                     rigid_body_node
                         .lin_damping
                         .try_sync_model(|v| native.set_linear_damping(v));
@@ -1583,6 +1613,15 @@ impl PhysicsWorld {
                                 native.apply_impulse_at_point(impulse, Point3::from(point), false)
                             }
                             ApplyAction::WakeUp => native.wake_up(true),
+                            ApplyAction::NextTranslation(position) => {
+                                native.set_next_kinematic_translation(position)
+                            }
+                            ApplyAction::NextRotation(rotation) => {
+                                native.set_next_kinematic_rotation(rotation)
+                            }
+                            ApplyAction::NextPosition(position) => {
+                                native.set_next_kinematic_position(position)
+                            }
                         }
                     }
                 }
@@ -1608,6 +1647,21 @@ impl PhysicsWorld {
                     !rigid_body_node.is_z_rotation_locked(),
                 );
 
+            match *rigid_body_node.mass_properties_type {
+                RigidBodyMassPropertiesType::Default => {
+                    builder = builder.additional_mass(*rigid_body_node.mass);
+                }
+                RigidBodyMassPropertiesType::Additional {
+                    center_of_mass,
+                    principal_inertia,
+                } => {
+                    builder = builder.additional_mass_properties(MassProperties::new(
+                        Point3::from(center_of_mass),
+                        *rigid_body_node.mass,
+                        principal_inertia,
+                    ));
+                }
+            };
             if rigid_body_node.is_translation_locked() {
                 builder = builder.lock_translations();
             }
@@ -1767,20 +1821,14 @@ impl PhysicsWorld {
             return;
         }
 
-        if let Some(native) = self.joints.set.get_mut(joint.native.get()) {
+        if let Some(native) = self.joints.set.get_mut(joint.native.get(), false) {
             joint.body1.try_sync_model(|v| {
-                if let Some(rigid_body_node) = nodes
-                    .try_borrow(v)
-                    .and_then(|n| n.cast::<scene::rigidbody::RigidBody>())
-                {
+                if let Some(rigid_body_node) = nodes.typed_ref(v) {
                     native.body1 = rigid_body_node.native.get();
                 }
             });
             joint.body2.try_sync_model(|v| {
-                if let Some(rigid_body_node) = nodes
-                    .try_borrow(v)
-                    .and_then(|n| n.cast::<scene::rigidbody::RigidBody>())
-                {
+                if let Some(rigid_body_node) = nodes.typed_ref(v) {
                     native.body2 = rigid_body_node.native.get();
                 }
             });
@@ -1796,12 +1844,8 @@ impl PhysicsWorld {
             let mut local_frames = joint.local_frames.borrow_mut();
             if local_frames.is_none() {
                 if let (Some(body1), Some(body2)) = (
-                    nodes
-                        .try_borrow(joint.body1())
-                        .and_then(|n| n.cast::<scene::rigidbody::RigidBody>()),
-                    nodes
-                        .try_borrow(joint.body2())
-                        .and_then(|n| n.cast::<scene::rigidbody::RigidBody>()),
+                    nodes.typed_ref(joint.body1()),
+                    nodes.typed_ref(joint.body2()),
                 ) {
                     let (local_frame1, local_frame2) = calculate_local_frames(joint, body1, body2);
                     native.data =
@@ -1817,14 +1861,12 @@ impl PhysicsWorld {
             // A native joint can be created iff both rigid bodies are correctly assigned and their respective
             // native bodies exists.
             if let (Some(body1), Some(body2)) = (
-                nodes.try_borrow(body1_handle).and_then(|n| {
-                    n.cast::<scene::rigidbody::RigidBody>()
-                        .filter(|b| self.bodies.get(b.native.get()).is_some())
-                }),
-                nodes.try_borrow(body2_handle).and_then(|n| {
-                    n.cast::<scene::rigidbody::RigidBody>()
-                        .filter(|b| self.bodies.get(b.native.get()).is_some())
-                }),
+                nodes
+                    .typed_ref(body1_handle)
+                    .filter(|b| self.bodies.get(b.native.get()).is_some()),
+                nodes
+                    .typed_ref(body2_handle)
+                    .filter(|b| self.bodies.get(b.native.get()).is_some()),
             ) {
                 // Calculate local frames first (if needed).
                 let mut local_frames = joint.local_frames.borrow_mut();

@@ -18,6 +18,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+use crate::renderer::DynamicSurfaceCache;
 use crate::{
     core::{
         algebra::{Matrix4, Vector3},
@@ -32,8 +33,8 @@ use crate::{
         cache::{shader::ShaderCache, texture::TextureCache, uniform::UniformMemoryAllocator},
         framework::{
             error::FrameworkError,
-            framebuffer::{Attachment, AttachmentKind, FrameBuffer},
-            gpu_texture::{GpuTexture, PixelKind},
+            framebuffer::{Attachment, AttachmentKind},
+            gpu_texture::PixelKind,
             server::GraphicsServer,
         },
         shadow::cascade_size,
@@ -42,7 +43,8 @@ use crate::{
     },
     scene::graph::Graph,
 };
-use std::{cell::RefCell, rc::Rc};
+use fyrox_graphics::framebuffer::GpuFrameBuffer;
+use fyrox_graphics::gpu_texture::GpuTexture;
 
 pub struct SpotShadowMapRenderer {
     precision: ShadowMapPrecision,
@@ -50,7 +52,7 @@ pub struct SpotShadowMapRenderer {
     //  0 - largest, for lights close to camera.
     //  1 - medium, for lights with medium distance to camera.
     //  2 - small, for farthest lights.
-    cascades: [Box<dyn FrameBuffer>; 3],
+    cascades: [GpuFrameBuffer; 3],
     size: usize,
 }
 
@@ -64,7 +66,7 @@ impl SpotShadowMapRenderer {
             server: &dyn GraphicsServer,
             size: usize,
             precision: ShadowMapPrecision,
-        ) -> Result<Box<dyn FrameBuffer>, FrameworkError> {
+        ) -> Result<GpuFrameBuffer, FrameworkError> {
             let depth = server.create_2d_render_target(
                 match precision {
                     ShadowMapPrecision::Full => PixelKind::D32F,
@@ -102,12 +104,8 @@ impl SpotShadowMapRenderer {
         self.precision
     }
 
-    pub fn cascade_texture(&self, cascade: usize) -> Rc<RefCell<dyn GpuTexture>> {
-        self.cascades[cascade]
-            .depth_attachment()
-            .unwrap()
-            .texture
-            .clone()
+    pub fn cascade_texture(&self, cascade: usize) -> &GpuTexture {
+        &self.cascades[cascade].depth_attachment().unwrap().texture
     }
 
     pub fn cascade_size(&self, cascade: usize) -> usize {
@@ -119,6 +117,7 @@ impl SpotShadowMapRenderer {
         &mut self,
         server: &dyn GraphicsServer,
         graph: &Graph,
+        elapsed_time: f32,
         light_position: Vector3<f32>,
         light_view_matrix: Matrix4<f32>,
         z_near: f32,
@@ -130,10 +129,11 @@ impl SpotShadowMapRenderer {
         texture_cache: &mut TextureCache,
         fallback_resources: &FallbackResources,
         uniform_memory_allocator: &mut UniformMemoryAllocator,
+        dynamic_surface_cache: &mut DynamicSurfaceCache,
     ) -> Result<RenderPassStatistics, FrameworkError> {
         let mut statistics = RenderPassStatistics::default();
 
-        let framebuffer = &mut *self.cascades[cascade];
+        let framebuffer = &self.cascades[cascade];
         let cascade_size = cascade_size(self.size, cascade);
 
         let viewport = Rect::new(0, 0, cascade_size as i32, cascade_size as i32);
@@ -142,6 +142,7 @@ impl SpotShadowMapRenderer {
 
         let bundle_storage = RenderDataBundleStorage::from_graph(
             graph,
+            elapsed_time,
             ObserverInfo {
                 observer_position: light_position,
                 z_near,
@@ -153,6 +154,7 @@ impl SpotShadowMapRenderer {
             RenderDataBundleStorageOptions {
                 collect_lights: false,
             },
+            dynamic_surface_cache,
         );
 
         statistics += bundle_storage.render_to_frame_buffer(

@@ -22,7 +22,6 @@
 
 use crate::{
     core::{
-        algebra::Point3,
         algebra::{
             Isometry2, Isometry3, Matrix4, Point2, Rotation3, Translation2, Translation3,
             UnitComplex, UnitQuaternion, UnitVector2, Vector2, Vector3,
@@ -36,7 +35,7 @@ use crate::{
         reflect::prelude::*,
         variable::{InheritableVariable, VariableFlags},
         visitor::prelude::*,
-        BiDirHashMap,
+        BiDirHashMap, ImmutableString,
     },
     graph::{BaseSceneGraph, SceneGraphNode},
     scene::{
@@ -53,7 +52,7 @@ use crate::{
             Graph, NodePool,
         },
         node::{Node, NodeTrait},
-        tilemap::{tileset::TileCollider, TileMap},
+        tilemap::TileMap,
     },
 };
 pub use rapier2d::geometry::shape::*;
@@ -79,6 +78,8 @@ use std::{
     num::NonZeroUsize,
     sync::Arc,
 };
+
+use super::collider::GeometrySource;
 
 /// A trait for ray cast results storage. It has two implementations: Vec and ArrayVec.
 /// Latter is needed for the cases where you need to avoid runtime memory allocations
@@ -323,14 +324,12 @@ fn convert_joint_params(
 }
 
 fn tile_map_to_collider_shape(
-    tile_map_shape: &TileMapShape,
+    tile_map: &GeometrySource,
     owner_inv_transform: Matrix4<f32>,
     nodes: &NodePool,
+    collider_name: &ImmutableString,
 ) -> Option<SharedShape> {
-    let tile_map_handle = tile_map_shape.tile_map.0;
-    let tile_map = nodes
-        .try_borrow(tile_map_handle)?
-        .component_ref::<TileMap>()?;
+    let tile_map = nodes.try_borrow(tile_map.0)?.component_ref::<TileMap>()?;
 
     let tile_set_resource = tile_map.tile_set()?.data_ref();
     let tile_set = tile_set_resource.as_loaded_ref()?;
@@ -338,57 +337,31 @@ fn tile_map_to_collider_shape(
     let tile_scale = tile_map.tile_scale();
     let global_transform = owner_inv_transform
         * tile_map.global_transform()
-        * Matrix4::new_nonuniform_scaling(&Vector3::new(tile_scale.x, tile_scale.y, 1.0));
+        * Matrix4::new_nonuniform_scaling(&Vector3::new(-tile_scale.x, tile_scale.y, 1.0));
 
     let mut vertices = Vec::new();
     let mut triangles = Vec::new();
 
-    for tile in tile_map.tiles().values() {
-        let Some(tile_definition) = tile_set.tiles.try_borrow(tile.definition_handle) else {
+    let collider_uuid = tile_set.collider_name_to_uuid(collider_name)?;
+    let tile_data = tile_map.tiles()?.data_ref();
+    let tile_data = tile_data.as_loaded_ref()?;
+    for (position, handle) in tile_data.iter() {
+        let Some(tile_definition) = tile_set.get_tile_data(handle.into()) else {
             continue;
         };
 
-        match tile_definition.collider {
-            TileCollider::None => {}
-            TileCollider::Rectangle => {
-                let origin = vertices.len() as u32;
-
-                let position = tile.position.cast::<f32>().to_homogeneous();
-                vertices.push(
-                    global_transform
-                        .transform_point(&Point3::from(position))
-                        .xy(),
-                );
-                vertices.push(
-                    global_transform
-                        .transform_point(&Point3::from(position + Vector3::new(1.0, 0.0, 0.0)))
-                        .xy(),
-                );
-                vertices.push(
-                    global_transform
-                        .transform_point(&Point3::from(position + Vector3::new(1.0, 1.0, 0.0)))
-                        .xy(),
-                );
-                vertices.push(
-                    global_transform
-                        .transform_point(&Point3::from(position + Vector3::new(0.0, 1.0, 0.0)))
-                        .xy(),
-                );
-
-                triangles.push([origin, origin + 1, origin + 2]);
-                triangles.push([origin, origin + 2, origin + 3]);
-            }
-            TileCollider::Mesh => {
-                // TODO: Add image-to-mesh conversion.
-            }
+        if let Some(collider) = tile_definition.colliders.get(&collider_uuid) {
+            let position = position.cast::<f32>().to_homogeneous();
+            collider.build_collider_shape(
+                &global_transform,
+                position,
+                &mut vertices,
+                &mut triangles,
+            );
         }
     }
 
-    if triangles.is_empty() {
-        None
-    } else {
-        Some(SharedShape::trimesh(vertices, triangles))
-    }
+    SharedShape::trimesh(vertices, triangles).ok()
 }
 
 // Converts descriptor in a shared shape.
@@ -422,9 +395,10 @@ fn collider_shape_into_native_shape(
         ColliderShape::Heightfield(_) => {
             None // TODO
         }
-        ColliderShape::TileMap(tilemap) => {
-            tile_map_to_collider_shape(tilemap, owner_inv_transform, nodes)
-        }
+        ColliderShape::TileMap(TileMapShape {
+            tile_map,
+            layer_name: collider_layer_name,
+        }) => tile_map_to_collider_shape(tile_map, owner_inv_transform, nodes, collider_layer_name),
     }
 }
 
@@ -651,6 +625,8 @@ impl PhysicsWorld {
                 max_ccd_substeps: self.integration_parameters.max_ccd_substeps as usize,
             };
 
+            let mut query = self.query.borrow_mut();
+
             self.pipeline.step(
                 &self.gravity,
                 &integration_parameters,
@@ -662,9 +638,7 @@ impl PhysicsWorld {
                 &mut self.joints.set,
                 &mut self.multibody_joints.set,
                 &mut self.ccd_solver,
-                // In Rapier 0.17 passing query pipeline here sometimes causing panic in numeric overflow,
-                // so we keep updating it manually.
-                None,
+                Some(&mut query),
                 &(),
                 &*self.event_handler,
             );
@@ -741,14 +715,7 @@ impl PhysicsWorld {
     pub fn cast_ray<S: QueryResultsStorage>(&self, opts: RayCastOptions, query_buffer: &mut S) {
         let time = instant::Instant::now();
 
-        let mut query = self.query.borrow_mut();
-
-        // TODO: Ideally this must be called once per frame, but it seems to be impossible because
-        // a body can be deleted during the consecutive calls of this method which will most
-        // likely end up in panic because of invalid handle stored in internal acceleration
-        // structure. This could be fixed by delaying deleting of bodies/collider to the end
-        // of the frame.
-        query.update(&self.colliders);
+        let query = self.query.borrow_mut();
 
         query_buffer.clear();
         let ray = Ray::new(
@@ -912,7 +879,7 @@ impl PhysicsWorld {
     ) {
         if *self.enabled {
             if let Some(native) = self.bodies.get(rigid_body.native.get()) {
-                if native.body_type() == RigidBodyType::Dynamic {
+                if native.body_type() != RigidBodyType::Fixed {
                     let local_transform: Matrix4<f32> = parent_transform
                         .try_inverse()
                         .unwrap_or_else(Matrix4::identity)
@@ -1048,6 +1015,15 @@ impl PhysicsWorld {
                                 native.apply_impulse_at_point(impulse, Point2::from(point), false)
                             }
                             ApplyAction::WakeUp => native.wake_up(true),
+                            ApplyAction::NextTranslation(position) => {
+                                native.set_next_kinematic_translation(position)
+                            }
+                            ApplyAction::NextRotation(rotation) => {
+                                native.set_next_kinematic_rotation(rotation)
+                            }
+                            ApplyAction::NextPosition(position) => {
+                                native.set_next_kinematic_position(position)
+                            }
                         }
                     }
                 }
@@ -1232,20 +1208,14 @@ impl PhysicsWorld {
             return;
         }
 
-        if let Some(native) = self.joints.set.get_mut(joint.native.get()) {
+        if let Some(native) = self.joints.set.get_mut(joint.native.get(), false) {
             joint.body1.try_sync_model(|v| {
-                if let Some(rigid_body_node) = nodes
-                    .try_borrow(v)
-                    .and_then(|n| n.cast::<dim2::rigidbody::RigidBody>())
-                {
+                if let Some(rigid_body_node) = nodes.typed_ref(v) {
                     native.body1 = rigid_body_node.native.get();
                 }
             });
             joint.body2.try_sync_model(|v| {
-                if let Some(rigid_body_node) = nodes
-                    .try_borrow(v)
-                    .and_then(|n| n.cast::<dim2::rigidbody::RigidBody>())
-                {
+                if let Some(rigid_body_node) = nodes.typed_ref(v) {
                     native.body2 = rigid_body_node.native.get();
                 }
             });
@@ -1260,12 +1230,8 @@ impl PhysicsWorld {
             let mut local_frames = joint.local_frames.borrow_mut();
             if local_frames.is_none() {
                 if let (Some(body1), Some(body2)) = (
-                    nodes
-                        .try_borrow(joint.body1())
-                        .and_then(|n| n.cast::<scene::rigidbody::RigidBody>()),
-                    nodes
-                        .try_borrow(joint.body2())
-                        .and_then(|n| n.cast::<scene::rigidbody::RigidBody>()),
+                    nodes.typed_ref(joint.body1()),
+                    nodes.typed_ref(joint.body2()),
                 ) {
                     let (local_frame1, local_frame2) = calculate_local_frames(joint, body1, body2);
                     native.data =
@@ -1279,14 +1245,9 @@ impl PhysicsWorld {
             let params = joint.params().clone();
 
             // A native joint can be created iff both rigid bodies are correctly assigned.
-            if let (Some(body1), Some(body2)) = (
-                nodes
-                    .try_borrow(body1_handle)
-                    .and_then(|n| n.cast::<dim2::rigidbody::RigidBody>()),
-                nodes
-                    .try_borrow(body2_handle)
-                    .and_then(|n| n.cast::<dim2::rigidbody::RigidBody>()),
-            ) {
+            if let (Some(body1), Some(body2)) =
+                (nodes.typed_ref(body1_handle), nodes.typed_ref(body2_handle))
+            {
                 // Calculate local frames first (if needed).
                 let mut local_frames = joint.local_frames.borrow_mut();
                 let (local_frame1, local_frame2) = local_frames

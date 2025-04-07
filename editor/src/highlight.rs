@@ -22,22 +22,19 @@ use crate::{
     fyrox::{
         core::{color::Color, pool::Handle, sstorage::ImmutableString},
         fxhash::FxHashSet,
-        graph::BaseSceneGraph,
+        graph::{BaseSceneGraph, SceneGraph},
         renderer::{
             bundle::{BundleRenderContext, ObserverInfo, RenderContext, RenderDataBundleStorage},
+            cache::shader::{
+                binding, property, PropertyGroup, RenderMaterial, RenderPassContainer,
+            },
             framework::{
                 buffer::BufferUsage,
                 error::FrameworkError,
-                framebuffer::{
-                    Attachment, AttachmentKind, BufferLocation, FrameBuffer, ResourceBindGroup,
-                    ResourceBinding,
-                },
-                geometry_buffer::GeometryBuffer,
-                gpu_program::{GpuProgram, UniformLocation},
+                framebuffer::{Attachment, AttachmentKind, GpuFrameBuffer},
+                geometry_buffer::GpuGeometryBuffer,
                 gpu_texture::PixelKind,
                 server::GraphicsServer,
-                uniform::StaticUniformBuffer,
-                BlendFactor, BlendFunc, BlendParameters, CompareFunc, DrawParameters, ElementRange,
                 GeometryBufferExt,
             },
             make_viewport_matrix, RenderPassStatistics, SceneRenderPass, SceneRenderPassContext,
@@ -46,84 +43,12 @@ use crate::{
     },
     Editor,
 };
-use fyrox::graph::SceneGraph;
 use std::{any::TypeId, cell::RefCell, rc::Rc};
 
-struct EdgeDetectShader {
-    program: Box<dyn GpuProgram>,
-    uniform_buffer_binding: usize,
-    frame_texture: UniformLocation,
-}
-
-impl EdgeDetectShader {
-    pub fn new(server: &dyn GraphicsServer) -> Result<Self, FrameworkError> {
-        let fragment_source = r#"
-layout (location = 0) out vec4 outColor;
-
-uniform sampler2D frameTexture;
-
-layout(std140) uniform Uniforms {
-    mat4 worldViewProjection;
-    vec4 color;
-};
-
-in vec2 texCoord;
-
-void main() {
-	ivec2 size = textureSize(frameTexture, 0);
-
-	float w = 1.0 / float(size.x);
-	float h = 1.0 / float(size.y);
-
-    float n[9];
-	n[0] = texture(frameTexture, texCoord + vec2(-w, -h)).a;
-	n[1] = texture(frameTexture, texCoord + vec2(0.0, -h)).a;
-	n[2] = texture(frameTexture, texCoord + vec2(w, -h)).a;
-	n[3] = texture(frameTexture, texCoord + vec2( -w, 0.0)).a;
-	n[4] = texture(frameTexture, texCoord).a;
-	n[5] = texture(frameTexture, texCoord + vec2(w, 0.0)).a;
-	n[6] = texture(frameTexture, texCoord + vec2(-w, h)).a;
-	n[7] = texture(frameTexture, texCoord + vec2(0.0, h)).a;
-	n[8] = texture(frameTexture, texCoord + vec2(w, h)).a;
-
-	float sobel_edge_h = n[2] + (2.0 * n[5]) + n[8] - (n[0] + (2.0 * n[3]) + n[6]);
-  	float sobel_edge_v = n[0] + (2.0 * n[1]) + n[2] - (n[6] + (2.0 * n[7]) + n[8]);
-	float sobel = sqrt((sobel_edge_h * sobel_edge_h) + (sobel_edge_v * sobel_edge_v));
-
-	outColor = vec4(color.rgb, color.a * sobel);
-}"#;
-
-        let vertex_source = r#"
-layout(location = 0) in vec3 vertexPosition;
-layout(location = 1) in vec2 vertexTexCoord;
-
-layout(std140) uniform Uniforms {
-    mat4 worldViewProjection;
-    vec4 color;
-};
-
-out vec2 texCoord;
-
-void main()
-{
-    texCoord = vertexTexCoord;
-    gl_Position = worldViewProjection * vec4(vertexPosition, 1.0);
-}"#;
-
-        let program = server.create_program("EdgeDetectShader", vertex_source, fragment_source)?;
-        Ok(Self {
-            uniform_buffer_binding: program
-                .uniform_block_index(&ImmutableString::new("Uniforms"))?,
-            frame_texture: program.uniform_location(&ImmutableString::new("frameTexture"))?,
-            program,
-        })
-    }
-}
-
 pub struct HighlightRenderPass {
-    framebuffer: Box<dyn FrameBuffer>,
-    quad: Box<dyn GeometryBuffer>,
-    edge_detect_shader: EdgeDetectShader,
+    framebuffer: GpuFrameBuffer,
+    quad: GpuGeometryBuffer,
+    edge_detect_shader: RenderPassContainer,
     pub scene_handle: Handle<Scene>,
     pub nodes_to_highlight: FxHashSet<Handle<Node>>,
 }
@@ -131,9 +56,12 @@ pub struct HighlightRenderPass {
 impl HighlightRenderPass {
     fn create_frame_buffer(
         server: &dyn GraphicsServer,
-        width: usize,
-        height: usize,
-    ) -> Box<dyn FrameBuffer> {
+        mut width: usize,
+        mut height: usize,
+    ) -> GpuFrameBuffer {
+        width = width.max(1);
+        height = height.max(1);
+
         let depth_stencil = server
             .create_2d_render_target(PixelKind::D24S8, width, height)
             .unwrap();
@@ -159,13 +87,17 @@ impl HighlightRenderPass {
     pub fn new_raw(server: &dyn GraphicsServer, width: usize, height: usize) -> Self {
         Self {
             framebuffer: Self::create_frame_buffer(server, width, height),
-            quad: <dyn GeometryBuffer>::from_surface_data(
+            quad: GpuGeometryBuffer::from_surface_data(
                 &SurfaceData::make_unit_xy_quad(),
                 BufferUsage::StaticDraw,
                 server,
             )
             .unwrap(),
-            edge_detect_shader: EdgeDetectShader::new(server).unwrap(),
+            edge_detect_shader: RenderPassContainer::from_str(
+                server,
+                include_str!("../resources/shaders/highlight.shader"),
+            )
+            .unwrap(),
             scene_handle: Default::default(),
             nodes_to_highlight: Default::default(),
         }
@@ -208,11 +140,13 @@ impl SceneRenderPass for HighlightRenderPass {
 
             let frustum = ctx.camera.frustum();
             let mut render_context = RenderContext {
+                elapsed_time: ctx.elapsed_time,
                 observer_info: &observer_info,
                 frustum: Some(&frustum),
                 storage: &mut render_bundle_storage,
                 graph: &ctx.scene.graph,
                 render_pass_name: &render_pass_name,
+                dynamic_surface_cache: ctx.dynamic_surface_cache,
             };
 
             for &root_node_handle in self.nodes_to_highlight.iter() {
@@ -237,12 +171,12 @@ impl SceneRenderPass for HighlightRenderPass {
                 BundleRenderContext {
                     texture_cache: ctx.texture_cache,
                     render_pass_name: &render_pass_name,
-                    frame_buffer: &mut *self.framebuffer,
+                    frame_buffer: &self.framebuffer,
                     use_pom: false,
                     light_position: &Default::default(),
                     fallback_resources: ctx.fallback_resources,
                     ambient_light: Default::default(),
-                    scene_depth: Some(&ctx.depth_texture),
+                    scene_depth: Some(ctx.depth_texture),
                     viewport: ctx.viewport,
                     uniform_memory_allocator: ctx.uniform_memory_allocator,
                 },
@@ -252,42 +186,31 @@ impl SceneRenderPass for HighlightRenderPass {
         // Render full screen quad with edge detect shader to draw outline of selected objects.
         {
             let frame_matrix = make_viewport_matrix(ctx.viewport);
-            let shader = &self.edge_detect_shader;
-            let frame_texture = self.framebuffer.color_attachments()[0].texture.clone();
-            ctx.framebuffer.draw(
-                &*self.quad,
+            let frame_texture = &self.framebuffer.color_attachments()[0].texture;
+
+            let color = Color::ORANGE.as_frgba();
+            let properties = PropertyGroup::from([
+                property("worldViewProjection", &frame_matrix),
+                property("color", &color),
+            ]);
+            let material = RenderMaterial::from([
+                binding(
+                    "frameTexture",
+                    (frame_texture, &ctx.fallback_resources.nearest_clamp_sampler),
+                ),
+                binding("properties", &properties),
+            ]);
+
+            stats += self.edge_detect_shader.run_pass(
+                1,
+                &ImmutableString::new("Primary"),
+                ctx.framebuffer,
+                &self.quad,
                 ctx.viewport,
-                &*shader.program,
-                &DrawParameters {
-                    cull_face: None,
-                    color_write: Default::default(),
-                    depth_write: false,
-                    stencil_test: None,
-                    depth_test: Some(CompareFunc::Less),
-                    blend: Some(BlendParameters {
-                        func: BlendFunc::new(BlendFactor::SrcAlpha, BlendFactor::OneMinusSrcAlpha),
-                        ..Default::default()
-                    }),
-                    stencil_op: Default::default(),
-                    scissor_box: None,
-                },
-                &[ResourceBindGroup {
-                    bindings: &[
-                        ResourceBinding::texture(&frame_texture, &shader.frame_texture),
-                        ResourceBinding::Buffer {
-                            buffer: ctx.uniform_buffer_cache.write(
-                                StaticUniformBuffer::<256>::new()
-                                    .with(&frame_matrix)
-                                    .with(&Color::ORANGE),
-                            )?,
-                            binding: BufferLocation::Auto {
-                                shader_location: shader.uniform_buffer_binding,
-                            },
-                            data_usage: Default::default(),
-                        },
-                    ],
-                }],
-                ElementRange::Full,
+                &material,
+                ctx.uniform_buffer_cache,
+                Default::default(),
+                None,
             )?;
         }
 

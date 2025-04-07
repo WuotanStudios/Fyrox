@@ -20,7 +20,6 @@
 
 //! See [`UiRenderer`] docs.
 
-use crate::renderer::FallbackResources;
 use crate::{
     asset::untyped::ResourceKind,
     core::{
@@ -34,52 +33,33 @@ use crate::{
         draw::{CommandTexture, DrawingContext},
     },
     renderer::{
-        cache::uniform::UniformBufferCache,
-        flat_shader::FlatShader,
+        cache::{
+            shader::{binding, property, PropertyGroup, RenderMaterial, RenderPassContainer},
+            uniform::UniformBufferCache,
+        },
         framework::{
             buffer::BufferUsage,
             error::FrameworkError,
-            framebuffer::{FrameBuffer, ResourceBindGroup, ResourceBinding},
+            framebuffer::GpuFrameBuffer,
             geometry_buffer::{
-                AttributeDefinition, AttributeKind, GeometryBuffer, GeometryBufferDescriptor,
-                VertexBufferData, VertexBufferDescriptor,
+                AttributeDefinition, AttributeKind, ElementsDescriptor, GeometryBufferDescriptor,
+                GpuGeometryBuffer, VertexBufferData, VertexBufferDescriptor,
             },
-            gpu_program::{GpuProgram, UniformLocation},
             server::GraphicsServer,
-            uniform::StaticUniformBuffer,
             BlendFactor, BlendFunc, BlendParameters, ColorMask, CompareFunc, DrawParameters,
-            ElementKind, ElementRange, ScissorBox, StencilAction, StencilFunc, StencilOp,
+            ElementRange, ScissorBox, StencilFunc,
         },
-        RenderPassStatistics, TextureCache,
+        FallbackResources, RenderPassStatistics, TextureCache,
     },
     resource::texture::{Texture, TextureKind, TexturePixelKind, TextureResource},
 };
-use fyrox_graphics::framebuffer::BufferLocation;
-
-struct UiShader {
-    program: Box<dyn GpuProgram>,
-    diffuse_texture: UniformLocation,
-    uniform_block_index: usize,
-}
-
-impl UiShader {
-    pub fn new(server: &dyn GraphicsServer) -> Result<Self, FrameworkError> {
-        let fragment_source = include_str!("shaders/ui_fs.glsl");
-        let vertex_source = include_str!("shaders/ui_vs.glsl");
-        let program = server.create_program("UIShader", vertex_source, fragment_source)?;
-        Ok(Self {
-            diffuse_texture: program.uniform_location(&ImmutableString::new("diffuseTexture"))?,
-            uniform_block_index: program.uniform_block_index(&ImmutableString::new("Uniforms"))?,
-            program,
-        })
-    }
-}
+use uuid::Uuid;
 
 /// User interface renderer allows you to render drawing context in specified render target.
 pub struct UiRenderer {
-    shader: UiShader,
-    geometry_buffer: Box<dyn GeometryBuffer>,
-    clipping_geometry_buffer: Box<dyn GeometryBuffer>,
+    render_passes: RenderPassContainer,
+    geometry_buffer: GpuGeometryBuffer,
+    clipping_geometry_buffer: GpuGeometryBuffer,
 }
 
 /// A set of parameters to render a specified user interface drawing context.
@@ -89,7 +69,7 @@ pub struct UiRenderContext<'a, 'b, 'c> {
     /// Viewport to where render the user interface.
     pub viewport: Rect<i32>,
     /// Frame buffer to where render the user interface.
-    pub frame_buffer: &'b mut dyn FrameBuffer,
+    pub frame_buffer: &'b GpuFrameBuffer,
     /// Width of the frame buffer to where render the user interface.
     pub frame_width: f32,
     /// Height of the frame buffer to where render the user interface.
@@ -102,14 +82,12 @@ pub struct UiRenderContext<'a, 'b, 'c> {
     pub texture_cache: &'a mut TextureCache,
     /// A reference to the cache of uniform buffers.
     pub uniform_buffer_cache: &'a mut UniformBufferCache,
-    /// A reference to the shader that will be used to draw clipping geometry.
-    pub flat_shader: &'a FlatShader,
 }
 
 impl UiRenderer {
     pub(in crate::renderer) fn new(server: &dyn GraphicsServer) -> Result<Self, FrameworkError> {
         let geometry_buffer_desc = GeometryBufferDescriptor {
-            element_kind: ElementKind::Triangle,
+            elements: ElementsDescriptor::Triangles(&[]),
             buffers: &[VertexBufferDescriptor {
                 usage: BufferUsage::DynamicDraw,
                 attributes: &[
@@ -141,7 +119,7 @@ impl UiRenderer {
         };
 
         let clipping_geometry_buffer_desc = GeometryBufferDescriptor {
-            element_kind: ElementKind::Triangle,
+            elements: ElementsDescriptor::Triangles(&[]),
             buffers: &[VertexBufferDescriptor {
                 usage: BufferUsage::DynamicDraw,
                 attributes: &[
@@ -163,7 +141,10 @@ impl UiRenderer {
             geometry_buffer: server.create_geometry_buffer(geometry_buffer_desc)?,
             clipping_geometry_buffer: server
                 .create_geometry_buffer(clipping_geometry_buffer_desc)?,
-            shader: UiShader::new(server)?,
+            render_passes: RenderPassContainer::from_str(
+                server,
+                include_str!("shaders/ui.shader"),
+            )?,
         })
     }
 
@@ -182,7 +163,6 @@ impl UiRenderer {
             fallback_resources,
             texture_cache,
             uniform_buffer_cache,
-            flat_shader,
         } = args;
 
         let mut statistics = RenderPassStatistics::default();
@@ -196,7 +176,10 @@ impl UiRenderer {
         let resolution = Vector2::new(frame_width, frame_height);
 
         for cmd in drawing_context.get_commands() {
-            let mut diffuse_texture = &fallback_resources.white_dummy;
+            let mut diffuse_texture = (
+                &fallback_resources.white_dummy,
+                &fallback_resources.linear_wrap_sampler,
+            );
             let mut is_font_texture = false;
 
             let mut clip_bounds = cmd.clip_bounds;
@@ -225,37 +208,19 @@ impl UiRenderer {
                 self.clipping_geometry_buffer
                     .set_triangles(&clipping_geometry.triangle_buffer);
 
-                let uniform_buffer =
-                    uniform_buffer_cache.write(StaticUniformBuffer::<256>::new().with(&ortho))?;
-
                 // Draw
-                statistics += frame_buffer.draw(
-                    &*self.clipping_geometry_buffer,
+                let properties = PropertyGroup::from([property("worldViewProjection", &ortho)]);
+                let material = RenderMaterial::from([binding("properties", &properties)]);
+                statistics += self.render_passes.run_pass(
+                    1,
+                    &ImmutableString::new("Clip"),
+                    frame_buffer,
+                    &self.geometry_buffer,
                     viewport,
-                    &*flat_shader.program,
-                    &DrawParameters {
-                        cull_face: None,
-                        color_write: ColorMask::all(false),
-                        depth_write: false,
-                        stencil_test: None,
-                        depth_test: None,
-                        blend: None,
-                        stencil_op: StencilOp {
-                            zpass: StencilAction::Incr,
-                            ..Default::default()
-                        },
-                        scissor_box,
-                    },
-                    &[ResourceBindGroup {
-                        bindings: &[ResourceBinding::Buffer {
-                            buffer: uniform_buffer,
-                            binding: BufferLocation::Auto {
-                                shader_location: flat_shader.uniform_buffer_binding,
-                            },
-                            data_usage: Default::default(),
-                        }],
-                    }],
-                    ElementRange::Full,
+                    &material,
+                    uniform_buffer_cache,
+                    Default::default(),
+                    None,
                 )?;
 
                 // Make sure main geometry will be drawn only on marked pixels.
@@ -289,8 +254,12 @@ impl UiRenderer {
                                     page.pixels.clone(),
                                 ) {
                                     page.texture = Some(
-                                        TextureResource::new_ok(ResourceKind::Embedded, details)
-                                            .into(),
+                                        TextureResource::new_ok(
+                                            Uuid::new_v4(),
+                                            ResourceKind::Embedded,
+                                            details,
+                                        )
+                                        .into(),
                                     );
                                     page.modified = false;
                                 }
@@ -304,7 +273,7 @@ impl UiRenderer {
                                     .try_cast::<Texture>()
                                     .unwrap(),
                             ) {
-                                diffuse_texture = texture;
+                                diffuse_texture = (&texture.gpu_texture, &texture.gpu_sampler);
                             }
                             is_font_texture = true;
                         }
@@ -312,7 +281,7 @@ impl UiRenderer {
                 }
                 CommandTexture::Texture(texture) => {
                     if let Some(texture) = texture_cache.get(server, texture) {
-                        diffuse_texture = texture;
+                        diffuse_texture = (&texture.gpu_texture, &texture.gpu_sampler);
                     }
                 }
                 _ => (),
@@ -377,45 +346,40 @@ impl UiRenderer {
                 | Brush::RadialGradient { ref stops, .. } => stops.len() as i32,
             };
 
-            let uniform_buffer = uniform_buffer_cache.write(
-                StaticUniformBuffer::<1024>::new()
-                    .with(&ortho)
-                    .with(&solid_color)
-                    .with_slice(gradient_colors)
-                    .with_slice(gradient_stops)
-                    .with(&gradient_origin)
-                    .with(&gradient_end)
-                    .with(&resolution)
-                    .with(&cmd.bounds.position)
-                    .with(&bounds_max)
-                    .with(&is_font_texture)
-                    .with(&cmd.opacity)
-                    .with(&brush_type)
-                    .with(&gradient_point_count),
-            )?;
+            let properties = PropertyGroup::from([
+                property("worldViewProjection", &ortho),
+                property("solidColor", &solid_color),
+                property("gradientColors", gradient_colors.as_slice()),
+                property("gradientStops", gradient_stops.as_slice()),
+                property("gradientOrigin", &gradient_origin),
+                property("gradientEnd", &gradient_end),
+                property("resolution", &resolution),
+                property("boundsMin", &cmd.bounds.position),
+                property("boundsMax", &bounds_max),
+                property("isFont", &is_font_texture),
+                property("opacity", &cmd.opacity),
+                property("brushType", &brush_type),
+                property("gradientPointCount", &gradient_point_count),
+            ]);
 
-            let shader = &self.shader;
-            statistics += frame_buffer.draw(
-                &*self.geometry_buffer,
+            let material = RenderMaterial::from([
+                binding("diffuseTexture", diffuse_texture),
+                binding("properties", &properties),
+            ]);
+
+            statistics += self.render_passes.run_pass(
+                1,
+                &ImmutableString::new("Primary"),
+                frame_buffer,
+                &self.geometry_buffer,
                 viewport,
-                &*self.shader.program,
-                &params,
-                &[ResourceBindGroup {
-                    bindings: &[
-                        ResourceBinding::texture(diffuse_texture, &shader.diffuse_texture),
-                        ResourceBinding::Buffer {
-                            buffer: uniform_buffer,
-                            binding: BufferLocation::Auto {
-                                shader_location: self.shader.uniform_block_index,
-                            },
-                            data_usage: Default::default(),
-                        },
-                    ],
-                }],
+                &material,
+                uniform_buffer_cache,
                 ElementRange::Specific {
                     offset: cmd.triangles.start,
                     count: cmd.triangles.end - cmd.triangles.start,
                 },
+                Some(&params),
             )?;
         }
 

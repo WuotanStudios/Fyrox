@@ -23,21 +23,19 @@
 #![allow(missing_docs)] // TODO
 
 use crate::{
-    asset::untyped::ResourceKind,
     core::{
         algebra::{Matrix4, Vector3, Vector4},
         arrayvec::ArrayVec,
         color,
         color::Color,
+        err_once,
         log::Log,
-        math::{frustum::Frustum, Rect},
+        math::{frustum::Frustum, Matrix4Ext, Rect},
         pool::Handle,
         sstorage::ImmutableString,
     },
     graph::BaseSceneGraph,
-    material::{
-        self, shader::ShaderDefinition, MaterialProperty, MaterialPropertyGroup, MaterialResource,
-    },
+    material::{self, shader::ShaderDefinition, MaterialPropertyRef, MaterialResource},
     renderer::{
         cache::{
             geometry::GeometryCache,
@@ -48,7 +46,7 @@ use crate::{
         },
         framework::{
             error::FrameworkError,
-            framebuffer::{BufferLocation, FrameBuffer, ResourceBindGroup, ResourceBinding},
+            framebuffer::{GpuFrameBuffer, ResourceBindGroup, ResourceBinding},
             gpu_program::{ShaderProperty, ShaderPropertyKind, ShaderResourceKind},
             gpu_texture::GpuTexture,
             server::GraphicsServer,
@@ -56,7 +54,7 @@ use crate::{
             uniform::{ByteStorage, UniformBuffer},
             ElementRange,
         },
-        FallbackResources, LightData, RenderPassStatistics,
+        DynamicSurfaceCache, FallbackResources, LightData, RenderPassStatistics,
     },
     resource::texture::TextureResource,
     scene::{
@@ -68,24 +66,18 @@ use crate::{
             BaseLight,
         },
         mesh::{
-            buffer::{
-                BytesStorage, TriangleBuffer, TriangleBufferRefMut, VertexAttributeDescriptor,
-                VertexBuffer, VertexBufferRefMut,
-            },
-            surface::{SurfaceData, SurfaceResource},
+            buffer::{TriangleBufferRefMut, VertexAttributeDescriptor, VertexBufferRefMut},
+            surface::SurfaceResource,
             RenderPath,
         },
         node::{Node, RdcControlFlow},
     },
 };
 use fxhash::{FxBuildHasher, FxHashMap, FxHasher};
-use fyrox_core::math::Matrix4Ext;
 use fyrox_graph::{SceneGraph, SceneGraphNode};
 use std::{
-    cell::RefCell,
     fmt::{Debug, Formatter},
     hash::{Hash, Hasher},
-    rc::Rc,
 };
 
 /// Observer info contains all the data, that describes an observer. It could be a real camera, light source's
@@ -107,6 +99,10 @@ pub struct ObserverInfo {
 /// Render context is used to collect render data from the scene nodes. It provides all required information about
 /// the observer (camera, light source virtual camera, etc.), that could be used for culling.
 pub struct RenderContext<'a> {
+    /// Amount of time (in seconds) that passed from creation of the engine. Keep in mind, that
+    /// this value is **not** guaranteed to match real time. A user can change delta time with
+    /// which the engine "ticks" and this delta time affects elapsed time.
+    pub elapsed_time: f32,
     pub observer_info: &'a ObserverInfo,
     /// Frustum of the observer, it is built using observer's view and projection matrix. Use the frustum to do
     /// frustum culling.
@@ -119,6 +115,7 @@ pub struct RenderContext<'a> {
     pub graph: &'a Graph,
     /// A name of the render pass for which the context was created for.
     pub render_pass_name: &'a ImmutableString,
+    pub dynamic_surface_cache: &'a mut DynamicSurfaceCache,
 }
 
 impl RenderContext<'_> {
@@ -141,7 +138,7 @@ impl RenderContext<'_> {
 pub struct BundleRenderContext<'a> {
     pub texture_cache: &'a mut TextureCache,
     pub render_pass_name: &'a ImmutableString,
-    pub frame_buffer: &'a mut dyn FrameBuffer,
+    pub frame_buffer: &'a GpuFrameBuffer,
     pub viewport: Rect<i32>,
     pub uniform_memory_allocator: &'a mut UniformMemoryAllocator,
 
@@ -151,7 +148,7 @@ pub struct BundleRenderContext<'a> {
     pub ambient_light: Color,
     // TODO: Add depth pre-pass to remove Option here. Current architecture allows only forward
     // renderer to have access to depth buffer that is available from G-Buffer.
-    pub scene_depth: Option<&'a Rc<RefCell<dyn GpuTexture>>>,
+    pub scene_depth: Option<&'a GpuTexture>,
     pub fallback_resources: &'a FallbackResources,
 }
 
@@ -168,6 +165,18 @@ pub struct SurfaceInstanceData {
     pub element_range: ElementRange,
     /// A handle of a node that emitted this surface data. Could be none, if there's no info about scene node.
     pub node_handle: Handle<Node>,
+}
+
+impl Default for SurfaceInstanceData {
+    fn default() -> Self {
+        Self {
+            world_transform: Matrix4::identity(),
+            bone_matrices: Default::default(),
+            blend_shapes_weights: Default::default(),
+            element_range: Default::default(),
+            node_handle: Default::default(),
+        }
+    }
 }
 
 /// A set of surface instances that share the same vertex/index data and a material.
@@ -226,20 +235,24 @@ pub struct GlobalUniformData {
     pub graphics_settings_block: UniformBlockLocation,
 }
 
-fn write_with_material<T: ByteStorage>(
+pub fn write_with_material<T, C, G>(
     shader_property_group: &[ShaderProperty],
-    material_property_group: &MaterialPropertyGroup,
+    material_property_group: &C,
+    getter: G,
     buf: &mut UniformBuffer<T>,
-) {
+) where
+    T: ByteStorage,
+    G: for<'a> Fn(&'a C, &ImmutableString) -> Option<MaterialPropertyRef<'a>>,
+{
     // The order of fields is strictly defined in shader, so we must iterate over shader definition
     // of a structure and look for respective values in the material.
     for shader_property in shader_property_group {
-        let material_property = material_property_group.property_ref(shader_property.name.clone());
+        let material_property = getter(material_property_group, &shader_property.name);
 
         macro_rules! push_value {
             ($variant:ident, $shader_value:ident) => {
                 if let Some(property) = material_property {
-                    if let MaterialProperty::$variant(material_value) = property {
+                    if let MaterialPropertyRef::$variant(material_value) = property {
                         buf.push(material_value);
                     } else {
                         buf.push($shader_value);
@@ -258,7 +271,7 @@ fn write_with_material<T: ByteStorage>(
         macro_rules! push_slice {
             ($variant:ident, $shader_value:ident, $max_size:ident) => {
                 if let Some(property) = material_property {
-                    if let MaterialProperty::$variant(material_value) = property {
+                    if let MaterialPropertyRef::$variant(material_value) = property {
                         buf.push_slice_with_max_size(material_value, *$max_size);
                     } else {
                         buf.push_slice_with_max_size($shader_value, *$max_size);
@@ -276,25 +289,25 @@ fn write_with_material<T: ByteStorage>(
 
         use ShaderPropertyKind::*;
         match &shader_property.kind {
-            Float(value) => push_value!(Float, value),
+            Float { value } => push_value!(Float, value),
             FloatArray { value, max_len } => push_slice!(FloatArray, value, max_len),
-            Int(value) => push_value!(Int, value),
+            Int { value } => push_value!(Int, value),
             IntArray { value, max_len } => push_slice!(IntArray, value, max_len),
-            UInt(value) => push_value!(UInt, value),
+            UInt { value } => push_value!(UInt, value),
             UIntArray { value, max_len } => push_slice!(UIntArray, value, max_len),
-            Vector2(value) => push_value!(Vector2, value),
+            Vector2 { value } => push_value!(Vector2, value),
             Vector2Array { value, max_len } => push_slice!(Vector2Array, value, max_len),
-            Vector3(value) => push_value!(Vector3, value),
+            Vector3 { value } => push_value!(Vector3, value),
             Vector3Array { value, max_len } => push_slice!(Vector3Array, value, max_len),
-            Vector4(value) => push_value!(Vector4, value),
+            Vector4 { value: default } => push_value!(Vector4, default),
             Vector4Array { value, max_len } => push_slice!(Vector4Array, value, max_len),
-            Matrix2(value) => push_value!(Matrix2, value),
+            Matrix2 { value: default } => push_value!(Matrix2, default),
             Matrix2Array { value, max_len } => push_slice!(Matrix2Array, value, max_len),
-            Matrix3(value) => push_value!(Matrix3, value),
+            Matrix3 { value: default } => push_value!(Matrix3, default),
             Matrix3Array { value, max_len } => push_slice!(Matrix3Array, value, max_len),
-            Matrix4(value) => push_value!(Matrix4, value),
+            Matrix4 { value: default } => push_value!(Matrix4, default),
             Matrix4Array { value, max_len } => push_slice!(Matrix4Array, value, max_len),
-            Bool(value) => push_value!(Bool, value),
+            Bool { value } => push_value!(Bool, value),
             Color { r, g, b, a } => {
                 let value = &color::Color::from_rgba(*r, *g, *b, *a);
                 push_value!(Color, value)
@@ -303,32 +316,32 @@ fn write_with_material<T: ByteStorage>(
     }
 }
 
-fn write_shader_values<T: ByteStorage>(
+pub fn write_shader_values<T: ByteStorage>(
     shader_property_group: &[ShaderProperty],
     buf: &mut UniformBuffer<T>,
 ) {
     for property in shader_property_group {
         use ShaderPropertyKind::*;
         match &property.kind {
-            Float(value) => buf.push(value),
+            Float { value } => buf.push(value),
             FloatArray { value, max_len } => buf.push_slice_with_max_size(value, *max_len),
-            Int(value) => buf.push(value),
+            Int { value } => buf.push(value),
             IntArray { value, max_len } => buf.push_slice_with_max_size(value, *max_len),
-            UInt(value) => buf.push(value),
+            UInt { value } => buf.push(value),
             UIntArray { value, max_len } => buf.push_slice_with_max_size(value, *max_len),
-            Vector2(value) => buf.push(value),
+            Vector2 { value } => buf.push(value),
             Vector2Array { value, max_len } => buf.push_slice_with_max_size(value, *max_len),
-            Vector3(value) => buf.push(value),
+            Vector3 { value } => buf.push(value),
             Vector3Array { value, max_len } => buf.push_slice_with_max_size(value, *max_len),
-            Vector4(value) => buf.push(value),
+            Vector4 { value: default } => buf.push(default),
             Vector4Array { value, max_len } => buf.push_slice_with_max_size(value, *max_len),
-            Matrix2(value) => buf.push(value),
+            Matrix2 { value: default } => buf.push(default),
             Matrix2Array { value, max_len } => buf.push_slice_with_max_size(value, *max_len),
-            Matrix3(value) => buf.push(value),
+            Matrix3 { value: default } => buf.push(default),
             Matrix3Array { value, max_len } => buf.push_slice_with_max_size(value, *max_len),
-            Matrix4(value) => buf.push(value),
+            Matrix4 { value: default } => buf.push(default),
             Matrix4Array { value, max_len } => buf.push_slice_with_max_size(value, *max_len),
-            Bool(value) => buf.push(value),
+            Bool { value } => buf.push(value),
             Color { r, g, b, a } => buf.push(&color::Color::from_rgba(*r, *g, *b, *a)),
         };
     }
@@ -342,12 +355,12 @@ impl RenderDataBundle {
         render_context: &mut BundleRenderContext,
     ) -> Option<BundleUniformData> {
         let mut material_state = self.material.state();
-
         let material = material_state.data()?;
 
         // Upload material property groups.
         let mut material_property_group_blocks = Vec::new();
-        let shader = material.shader().data_ref();
+        let shader_state = material.shader().state();
+        let shader = shader_state.data_ref()?;
         for resource_definition in shader.definition.resources.iter() {
             // Ignore built-in groups.
             if resource_definition.is_built_in() {
@@ -365,7 +378,12 @@ impl RenderDataBundle {
             if let Some(material_property_group) =
                 material.property_group_ref(resource_definition.name.clone())
             {
-                write_with_material(shader_property_group, material_property_group, &mut buf);
+                write_with_material(
+                    shader_property_group,
+                    material_property_group,
+                    |c, n| c.property_ref(n.clone()).map(|p| p.as_ref()),
+                    &mut buf,
+                );
             } else {
                 // No respective resource bound in the material, use shader defaults. This is very
                 // important, because some drivers will crash if uniform buffer has insufficient
@@ -423,7 +441,7 @@ impl RenderDataBundle {
 
                 let bone_matrices_block = render_context
                     .uniform_memory_allocator
-                    .allocate(StaticUniformBuffer::<SIZE>::new().with_slice(&matrices));
+                    .allocate(StaticUniformBuffer::<SIZE>::new().with(&matrices));
                 instance_uniform_data.bone_matrices_block = Some(bone_matrices_block);
             }
 
@@ -456,38 +474,76 @@ impl RenderDataBundle {
         let mut material_state = self.material.state();
 
         let Some(material) = material_state.data() else {
+            err_once!(
+                self.data.key() as usize,
+                "Unable to use material {}, because it is in invalid state \
+                (failed to load or still loading)!",
+                material_state.kind()
+            );
             return Ok(stats);
         };
 
-        let Some(geometry) = geometry_cache.get(server, &self.data, self.time_to_live) else {
+        let geometry = match geometry_cache.get(server, &self.data, self.time_to_live) {
+            Ok(geometry) => geometry,
+            Err(err) => {
+                err_once!(
+                    self.data.key() as usize,
+                    "Unable to get geometry for rendering! Reason: {err:?}"
+                );
+                return Ok(stats);
+            }
+        };
+
+        let Some(shader_set) = shader_cache.get(server, material.shader()) else {
+            err_once!(
+                self.data.key() as usize,
+                "Unable to get a compiled shader set for material {:?}!",
+                material.shader().resource_uuid()
+            );
             return Ok(stats);
         };
 
-        let Some(render_pass) =
-            shader_cache
-                .get(server, material.shader())
-                .and_then(|shader_set| {
-                    shader_set
-                        .render_passes
-                        .get(render_context.render_pass_name)
-                })
+        let Some(render_pass) = shader_set
+            .render_passes
+            .get(render_context.render_pass_name)
         else {
+            let shader_state = material.shader().state();
+            if let Some(shader_data) = shader_state.data_ref() {
+                if !shader_data
+                    .definition
+                    .disabled_passes
+                    .iter()
+                    .any(|pass_name| pass_name.as_str() == render_context.render_pass_name.as_str())
+                {
+                    err_once!(
+                        self.data.key() as usize,
+                        "There's no render pass {} in {} shader! \
+                        If it is not needed, add it to disabled passes.",
+                        render_context.render_pass_name,
+                        shader_state.kind()
+                    );
+                }
+            }
             return Ok(stats);
         };
 
         let mut material_bindings = ArrayVec::<ResourceBinding, 32>::new();
-        let shader = material.shader().data_ref();
+        let shader_state = material.shader().state();
+        let shader = shader_state
+            .data_ref()
+            .ok_or_else(|| FrameworkError::Custom("Invalid shader!".to_string()))?;
         for resource_definition in shader.definition.resources.iter() {
             let name = resource_definition.name.as_str();
 
             match name {
                 "fyrox_sceneDepth" => {
-                    material_bindings.push(ResourceBinding::texture_with_binding(
+                    material_bindings.push(ResourceBinding::texture(
                         if let Some(scene_depth) = render_context.scene_depth.as_ref() {
                             scene_depth
                         } else {
                             &render_context.fallback_resources.black_dummy
                         },
+                        &render_context.fallback_resources.nearest_clamp_sampler,
                         resource_definition.binding,
                     ));
                 }
@@ -526,15 +582,24 @@ impl RenderDataBundle {
                 _ => match resource_definition.kind {
                     ShaderResourceKind::Texture { fallback, .. } => {
                         let fallback = render_context.fallback_resources.sampler_fallback(fallback);
+                        let fallback = (
+                            fallback,
+                            &render_context.fallback_resources.linear_wrap_sampler,
+                        );
 
-                        let texture = if let Some(binding) =
+                        let texture_sampler_pair = if let Some(binding) =
                             material.binding_ref(resource_definition.name.clone())
                         {
                             if let material::MaterialResourceBinding::Texture(binding) = binding {
                                 binding
                                     .value
                                     .as_ref()
-                                    .and_then(|t| render_context.texture_cache.get(server, t))
+                                    .and_then(|t| {
+                                        render_context
+                                            .texture_cache
+                                            .get(server, t)
+                                            .map(|t| (&t.gpu_texture, &t.gpu_sampler))
+                                    })
                                     .unwrap_or(fallback)
                             } else {
                                 Log::err(format!(
@@ -549,8 +614,9 @@ impl RenderDataBundle {
                             fallback
                         };
 
-                        material_bindings.push(ResourceBinding::texture_with_binding(
-                            texture,
+                        material_bindings.push(ResourceBinding::texture(
+                            texture_sampler_pair.0,
+                            texture_sampler_pair.1,
                             resource_definition.binding,
                         ));
                     }
@@ -606,12 +672,11 @@ impl RenderDataBundle {
                                 // Bind stub buffer, instead of creating and uploading 16kb with zeros per draw
                                 // call.
                                 instance_bindings.push(ResourceBinding::Buffer {
-                                    buffer: &*render_context
+                                    buffer: render_context
                                         .fallback_resources
-                                        .bone_matrices_stub_uniform_buffer,
-                                    binding: BufferLocation::Explicit {
-                                        binding: resource_definition.binding,
-                                    },
+                                        .bone_matrices_stub_uniform_buffer
+                                        .clone(),
+                                    binding: resource_definition.binding,
                                     data_usage: Default::default(),
                                 });
                             }
@@ -624,7 +689,7 @@ impl RenderDataBundle {
             stats += render_context.frame_buffer.draw(
                 geometry,
                 render_context.viewport,
-                &*render_pass.program,
+                &render_pass.program,
                 &render_pass.draw_params,
                 &[
                     ResourceBindGroup {
@@ -666,6 +731,7 @@ pub trait RenderDataBundleStorageTrait {
     /// pre-processing them on CPU could take more time than rendering them directly on GPU one-by-one.
     fn push_triangles(
         &mut self,
+        dynamic_surface_cache: &mut DynamicSurfaceCache,
         layout: &[VertexAttributeDescriptor],
         material: &MaterialResource,
         render_path: RenderPath,
@@ -759,9 +825,11 @@ impl RenderDataBundleStorage {
     /// Frustum culling is done on scene node side ([`crate::scene::node::NodeTrait::collect_render_data`]).
     pub fn from_graph(
         graph: &Graph,
+        elapsed_time: f32,
         observer_info: ObserverInfo,
         render_pass_name: ImmutableString,
         options: RenderDataBundleStorageOptions,
+        dynamic_surface_cache: &mut DynamicSurfaceCache,
     ) -> Self {
         // Aim for the worst-case scenario when every node has unique render data.
         let capacity = graph.node_count() as usize;
@@ -846,11 +914,13 @@ impl RenderDataBundleStorage {
         }
 
         let mut ctx = RenderContext {
+            elapsed_time,
             observer_info: &observer_info,
             frustum: Some(&frustum),
             storage: &mut storage,
             graph,
             render_pass_name: &render_pass_name,
+            dynamic_surface_cache,
         };
 
         #[inline(always)]
@@ -929,10 +999,10 @@ impl RenderDataBundleStorage {
 
         let lights_data = StaticUniformBuffer::<2048>::new()
             .with(&(light_data.count as i32))
-            .with_slice(&light_data.color_radius)
-            .with_slice(&light_data.parameters)
-            .with_slice(&light_data.position)
-            .with_slice(&light_data.direction);
+            .with(&light_data.color_radius)
+            .with(&light_data.parameters)
+            .with(&light_data.position)
+            .with(&light_data.direction);
         let lights_block = render_context
             .uniform_memory_allocator
             .allocate(lights_data);
@@ -1043,6 +1113,7 @@ impl RenderDataBundleStorageTrait for RenderDataBundleStorage {
     /// pre-processing them on CPU could take more time than rendering them directly on GPU one-by-one.
     fn push_triangles(
         &mut self,
+        dynamic_surface_cache: &mut DynamicSurfaceCache,
         layout: &[VertexAttributeDescriptor],
         material: &MaterialResource,
         render_path: RenderPath,
@@ -1059,43 +1130,20 @@ impl RenderDataBundleStorageTrait for RenderDataBundleStorage {
         let bundle = if let Some(&bundle_index) = self.bundle_map.get(&key) {
             self.bundles.get_mut(bundle_index).unwrap()
         } else {
-            let default_capacity = 4096;
-
-            // Initialize empty vertex buffer.
-            let vertex_buffer = VertexBuffer::new_with_layout(
-                layout,
-                0,
-                BytesStorage::with_capacity(default_capacity),
-            )
-            .unwrap();
-
-            // Initialize empty triangle buffer.
-            let triangle_buffer = TriangleBuffer::new(Vec::with_capacity(default_capacity * 3));
-
-            // Create temporary surface data (valid for one frame).
-            let data = SurfaceResource::new_ok(
-                ResourceKind::Embedded,
-                SurfaceData::new(vertex_buffer, triangle_buffer),
-            );
-
             self.bundle_map.insert(key, self.bundles.len());
             self.bundles.push(RenderDataBundle {
-                data,
+                data: dynamic_surface_cache.get_or_create(key, layout),
                 sort_index,
                 instances: vec![
                     // Each bundle must have at least one instance to be rendered.
                     SurfaceInstanceData {
-                        world_transform: Matrix4::identity(),
-                        bone_matrices: Default::default(),
-                        blend_shapes_weights: Default::default(),
-                        element_range: Default::default(),
                         node_handle,
+                        ..Default::default()
                     },
                 ],
                 material: material.clone(),
                 render_path,
-                // Temporary buffer lives one frame.
-                time_to_live: TimeToLive(0.0),
+                time_to_live: Default::default(),
             });
             self.bundles.last_mut().unwrap()
         };

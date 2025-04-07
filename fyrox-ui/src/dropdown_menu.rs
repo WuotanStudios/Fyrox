@@ -28,6 +28,7 @@ use crate::{
     widget::{Widget, WidgetBuilder, WidgetMessage},
     BuildContext, Control, UiNode, UserInterface,
 };
+
 use std::ops::{Deref, DerefMut};
 use std::sync::mpsc::Sender;
 
@@ -35,6 +36,7 @@ use std::sync::mpsc::Sender;
 /// consolidates content of a group.
 #[derive(Default, Clone, Visit, Reflect, Debug, TypeUuidProvider, ComponentProvider)]
 #[type_uuid(id = "c0a4c51b-f041-453b-a89d-7ceb5394e321")]
+#[reflect(derived_type = "UiNode")]
 pub struct DropdownMenu {
     /// Base widget of the dropdown menu.
     pub widget: Widget,

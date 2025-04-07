@@ -44,6 +44,7 @@
 //! use fyrox_sound::renderer::Renderer;
 //! use std::path::{Path, PathBuf};
 //! use hrtf::HrirSphere;
+//! use fyrox_resource::untyped::ResourceKind;
 //!
 //! fn use_hrtf(context: &mut SoundContext) {
 //!     // IRC_1002_C.bin is HRIR sphere in binary format, can be any valid HRIR sphere
@@ -51,7 +52,7 @@
 //!     let hrir_path = PathBuf::from("examples/data/IRC_1002_C.bin");
 //!     let hrir_sphere = HrirSphere::from_file(&hrir_path, context::SAMPLE_RATE).unwrap();
 //!
-//!     context.state().set_renderer(Renderer::HrtfRenderer(HrtfRenderer::new(HrirSphereResource::from_hrir_sphere(hrir_sphere, hrir_path.into()))));
+//!     context.state().set_renderer(Renderer::HrtfRenderer(HrtfRenderer::new(HrirSphereResource::from_hrir_sphere(hrir_sphere, ResourceKind::Embedded))));
 //! }
 //! ```
 //!
@@ -95,7 +96,7 @@ use fyrox_resource::{
 use hrtf::HrirSphere;
 use std::error::Error;
 use std::path::Path;
-use std::{any::Any, fmt::Debug, fmt::Formatter, path::PathBuf, sync::Arc};
+use std::{fmt::Debug, fmt::Formatter, path::PathBuf, sync::Arc};
 
 /// See module docs.
 #[derive(Clone, Debug, Default, Reflect)]
@@ -222,14 +223,6 @@ impl TypeUuidProvider for HrirSphereResourceData {
 }
 
 impl ResourceData for HrirSphereResourceData {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-
     fn type_uuid(&self) -> Uuid {
         <Self as TypeUuidProvider>::type_uuid()
     }
@@ -280,6 +273,7 @@ pub trait HrirSphereResourceExt {
 impl HrirSphereResourceExt for HrirSphereResource {
     fn from_hrir_sphere(hrir_sphere: HrirSphere, kind: ResourceKind) -> Self {
         Resource::new_ok(
+            Uuid::new_v4(),
             kind,
             HrirSphereResourceData {
                 hrir_sphere: Some(hrir_sphere),

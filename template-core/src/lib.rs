@@ -26,32 +26,16 @@ use std::{
     collections::HashMap,
     fmt::Display,
     fs::{create_dir_all, read_dir, remove_dir_all, File},
-    io::{Cursor, Read, Write},
+    io::{Read, Write},
     path::Path,
     process::Command,
-    sync::LazyLock,
 };
 use toml_edit::{table, value, DocumentMut};
 use uuid::Uuid;
 
-// Template generator version must match the engine version. This is checked by the CI.
-pub static CURRENT_VERSION: LazyLock<String> = LazyLock::new(|| {
-    let manifest = include_bytes!("../Cargo.toml");
-
-    let mut file = Cursor::new(&manifest);
-    let mut toml = String::new();
-    if file.read_to_string(&mut toml).is_ok() {
-        if let Ok(document) = toml.parse::<DocumentMut>() {
-            if let Some(package) = document.get("package").and_then(|i| i.as_table()) {
-                if let Some(version) = package.get("version") {
-                    return version.to_string().replace('\"', "");
-                }
-            }
-        }
-    }
-
-    panic!("Project manager's Cargo.toml is malformed!");
-});
+pub static CURRENT_ENGINE_VERSION: &str = include_str!("../engine.version");
+pub static CURRENT_EDITOR_VERSION: &str = include_str!("../editor.version");
+pub static CURRENT_SCRIPTS_VERSION: &str = include_str!("../scripts.version");
 
 fn write_file<P: AsRef<Path>, S: AsRef<str>>(path: P, content: S) -> Result<(), String> {
     let mut file = File::create(path.as_ref()).map_err(|e| e.to_string())?;
@@ -76,26 +60,35 @@ fn write_file_binary<P: AsRef<Path>>(path: P, content: &[u8]) -> Result<(), Stri
 }
 
 #[derive(Debug)]
-enum NameErrors {
+pub enum NameError {
+    Empty,
     CargoReserved(String),
-    Hyphen,
     StartsWithNumber,
+    InvalidCharacter(char),
 }
 
-impl Display for NameErrors {
+impl Display for NameError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::CargoReserved(name) => write!(
                 f,
                 "The project name cannot be `{name}` due to cargo's reserved keywords"
             ),
-            Self::Hyphen => write!(f, "The project name cannot contain `-`"),
             Self::StartsWithNumber => write!(f, "The project name cannot start with a number"),
+            Self::InvalidCharacter(ch) => write!(
+                f,
+                "The project name cannot contain {ch} \
+            characters! It can start from most letters or '_' symbol and the rest of the name \
+            must be letters, '-', '_', numbers."
+            ),
+            NameError::Empty => {
+                write!(f, "The project name cannot be empty!")
+            }
         }
     }
 }
 
-fn check_name(name: &str) -> Result<&str, NameErrors> {
+pub fn check_name(name: &str) -> Result<&str, NameError> {
     const RESERVED_NAMES: [&str; 53] = [
         "abstract", "alignof", "as", "become", "box", "break", "const", "continue", "crate", "do",
         "else", "enum", "extern", "false", "final", "fn", "for", "if", "impl", "in", "let", "loop",
@@ -104,15 +97,31 @@ fn check_name(name: &str) -> Result<&str, NameErrors> {
         "true", "type", "typeof", "try", "unsafe", "unsized", "use", "virtual", "where", "while",
         "yield",
     ];
+
+    if name.is_empty() {
+        return Err(NameError::Empty);
+    }
+
     if RESERVED_NAMES.contains(&name) {
-        return Err(NameErrors::CargoReserved(name.to_string()));
+        return Err(NameError::CargoReserved(name.to_string()));
     }
-    if name.contains('-') {
-        return Err(NameErrors::Hyphen);
+
+    let mut chars = name.chars();
+    if let Some(ch) = chars.next() {
+        if ch.is_ascii_digit() {
+            return Err(NameError::StartsWithNumber);
+        }
+        if !(unicode_xid::UnicodeXID::is_xid_start(ch) || ch == '_') {
+            return Err(NameError::InvalidCharacter(ch));
+        }
     }
-    if name.chars().next().unwrap_or(' ').is_ascii_digit() {
-        return Err(NameErrors::StartsWithNumber);
+
+    for ch in chars {
+        if !(unicode_xid::UnicodeXID::is_xid_continue(ch) || ch == '-') {
+            return Err(NameError::InvalidCharacter(ch));
+        }
     }
+
     Ok(name)
 }
 
@@ -168,7 +177,7 @@ impl Plugin for Game {
     fn register(&self, _context: PluginRegistrationContext) {
         // Register your scripts here.
     }
-    
+
     fn init(&mut self, scene_path: Option<&str>, context: PluginContext) {
         context
             .async_scene_loader
@@ -253,13 +262,14 @@ dylib = ["fyrox/dylib"]
         format!(
             r#"//! Executor with your game connected to it as a plugin.
 use fyrox::engine::executor::Executor;
+use fyrox::event_loop::EventLoop;
 use fyrox::core::log::Log;
 
 fn main() {{
     Log::set_file_name("{name}.log");
 
-    let mut executor = Executor::new();
-   
+    let mut executor = Executor::new(Some(EventLoop::new().unwrap()));
+
     // Dynamic linking with hot reloading.
     #[cfg(feature = "dylib")]
     {{
@@ -277,8 +287,8 @@ fn main() {{
     {{
         use {name}::Game;
         executor.add_plugin(Game::default());
-    }}  
-   
+    }}
+
     executor.run()
 }}"#,
         ),
@@ -316,7 +326,9 @@ fyrox = {{workspace = true}}
         base_path.join("executor-wasm/src/lib.rs"),
         format!(
             r#"//! Executor with your game connected to it as a plugin.
+#![cfg(target_arch = "wasm32")]
 use fyrox::engine::executor::Executor;
+use fyrox::event_loop::EventLoop;
 use {name}::Game;
 use fyrox::core::wasm_bindgen::{{self, prelude::*}};
 
@@ -356,7 +368,7 @@ pub fn set_panic_hook() {{
 #[wasm_bindgen]
 pub fn main() {{
     set_panic_hook();
-    let mut executor = Executor::new();
+    let mut executor = Executor::new(Some(EventLoop::new().unwrap()));
     executor.add_plugin(Game::default());
     executor.run()
 }}"#,
@@ -434,7 +446,7 @@ fn main() {{
             scenes: vec!["data/scene.rgs".into()],
         }}),
     );
-    
+
      // Dynamic linking with hot reloading.
     #[cfg(feature = "dylib")]
     {{
@@ -453,7 +465,7 @@ fn main() {{
         use {name}::Game;
         editor.add_game_plugin(Game::default());
     }}
-    
+
     editor.run(event_loop)
 }}
 "#,
@@ -553,6 +565,7 @@ fyrox = {{ workspace = true }}
         base_path.join("executor-android/src/lib.rs"),
         format!(
             r#"//! Android executor with your game connected to it as a plugin.
+#![cfg(target_os = "android")]
 use fyrox::{{
     core::io, engine::executor::Executor, event_loop::EventLoopBuilder,
     platform::android::EventLoopBuilderExtAndroid,
@@ -565,7 +578,7 @@ fn android_main(app: fyrox::platform::android::activity::AndroidApp) {{
         .set(app.clone())
         .expect("ANDROID_APP cannot be set twice.");
     let event_loop = EventLoopBuilder::new().with_android_app(app).build().unwrap();
-    let mut executor = Executor::from_params(event_loop, Default::default());
+    let mut executor = Executor::from_params(Some(event_loop), Default::default());
     executor.add_plugin(Game::default());
     executor.run()
 }}"#,
@@ -596,7 +609,6 @@ fn init_workspace(base_path: &Path, vcs: &str) -> Result<(), String> {
     }
 
     // Write Cargo.toml
-    let version = &*CURRENT_VERSION;
     write_file(
         base_path.join("Cargo.toml"),
         format!(
@@ -606,10 +618,10 @@ members = ["editor", "executor", "executor-wasm", "executor-android", "game", "g
 resolver = "2"
 
 [workspace.dependencies.fyrox]
-version = "{version}"
+version = "{CURRENT_ENGINE_VERSION}"
 default-features = false
 [workspace.dependencies.fyroxed_base]
-version = "{version}"
+version = "{CURRENT_EDITOR_VERSION}"
 default-features = false
 
 # Separate build profiles for hot reloading. These profiles ensures that build artifacts for
@@ -775,10 +787,10 @@ pub fn upgrade_project(root_path: &Path, version: &str, local: bool) -> Result<(
     // TODO: This will be obsolete in 1.0 and should be removed.
     let editor_versions = [
         (
-            CURRENT_VERSION.to_string(),
+            CURRENT_ENGINE_VERSION.to_string(),
             (
-                CURRENT_VERSION.to_string(),
-                Some(CURRENT_VERSION.to_string()),
+                CURRENT_EDITOR_VERSION.to_string(),
+                Some(CURRENT_SCRIPTS_VERSION.to_string()),
             ),
         ),
         (
@@ -836,10 +848,11 @@ pub fn upgrade_project(root_path: &Path, version: &str, local: bool) -> Result<(
                                         dependencies["fyrox_scripts"] = scripts_table;
                                     }
                                 } else {
-                                    dependencies["fyrox"] = value(&*CURRENT_VERSION);
-                                    dependencies["fyroxed_base"] = value(&*CURRENT_VERSION);
+                                    dependencies["fyrox"] = value(CURRENT_ENGINE_VERSION);
+                                    dependencies["fyroxed_base"] = value(CURRENT_EDITOR_VERSION);
                                     if dependencies.contains_key("fyrox_scripts") {
-                                        dependencies["fyrox_scripts"] = value(&*CURRENT_VERSION);
+                                        dependencies["fyrox_scripts"] =
+                                            value(CURRENT_SCRIPTS_VERSION);
                                     }
                                 }
                             } else if version == "nightly" {

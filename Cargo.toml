@@ -18,12 +18,13 @@ members = [
     "fyrox-impl",
     "project-manager",
     "fyrox-graphics",
-    "fyrox-build-tools"
-, "fyrox-texture"]
+    "fyrox-build-tools",
+    "fyrox-texture",
+    "fyrox-autotile"]
 resolver = "2"
 
 [profile.dev]
-opt-level = 0
+opt-level = 1
 
 [profile.release]
 opt-level = 3

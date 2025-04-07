@@ -44,6 +44,8 @@ use crate::{
     BuildContext, Control, HorizontalAlignment, RestrictionEntry, Thickness, UiNode, UserInterface,
     VerticalAlignment,
 };
+
+use fyrox_core::log::Log;
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
 use fyrox_graph::{BaseSceneGraph, SceneGraph};
 use std::{
@@ -108,7 +110,7 @@ pub enum WindowMessage {
     Minimize(bool),
 
     /// Forces the window to take the inner size of main application window.
-    Maximize,
+    Maximize(bool),
 
     /// Whether or not window can be minimized by _ mark. false hides _ mark.
     CanMinimize(bool),
@@ -171,7 +173,7 @@ impl WindowMessage {
     );
     define_constructor!(
         /// Creates [`WindowMessage::Maximize`] message.
-        WindowMessage:Maximize => fn maximize(), layout: false
+        WindowMessage:Maximize => fn maximize(bool), layout: false
     );
     define_constructor!(
         /// Creates [`WindowMessage::CanMinimize`] message.
@@ -205,6 +207,18 @@ impl WindowMessage {
         /// Creates [`WindowMessage::SafeBorderSize`] message.
         WindowMessage:SafeBorderSize => fn safe_border_size(Option<Vector2<f32>>), layout: false
     );
+}
+
+/// The state of a window's size, as controlled by the buttons on the top-right corner.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Visit, Reflect)]
+pub enum WindowSizeState {
+    /// The window is neither maximized nor minimized, showing its content and free to move around the screen.
+    #[default]
+    Normal,
+    /// The window is hiding its content.
+    Minimized,
+    /// The window is filling the screen.
+    Maximized,
 }
 
 /// The Window widget provides a standard window that can contain another widget. Based on setting
@@ -284,9 +298,12 @@ impl WindowMessage {
 ///
 /// Any window can be set and unset as a modal via the *modal* function.
 #[derive(Default, Clone, Visit, Reflect, Debug, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct Window {
     /// Base widget of the window.
     pub widget: Widget,
+    /// The text to put in the tab for this window.
+    tab_label: String,
     /// Mouse click position.
     pub mouse_click_pos: Vector2<f32>,
     /// Initial mouse position.
@@ -295,8 +312,8 @@ pub struct Window {
     pub initial_size: Vector2<f32>,
     /// Whether the window is being dragged or not.
     pub is_dragging: bool,
-    /// Whether the window is minimized or not.
-    pub minimized: bool,
+    /// Whether the window is minimized, maximized, or normal.
+    pub size_state: WindowSizeState,
     /// Whether the window can be minimized or not.
     pub can_minimize: bool,
     /// Whether the window can be maximized or not.
@@ -464,17 +481,18 @@ impl Control for Window {
                             MessageDirection::ToWidget,
                         ));
 
-                        // Check grips.
-                        for grip in self.grips.borrow_mut().iter_mut() {
-                            let offset = self.screen_position();
-                            let screen_bounds = grip.bounds.translate(offset);
-                            if screen_bounds.contains(pos) {
-                                grip.is_dragging = true;
-                                self.initial_position = self.screen_position();
-                                self.initial_size = self.actual_local_size();
-                                self.mouse_click_pos = pos;
-                                ui.capture_mouse(self.handle());
-                                break;
+                        if !self.maximized() {
+                            // Check grips.
+                            for grip in self.grips.borrow_mut().iter_mut() {
+                                let screen_bounds = grip.bounds.transform(&self.visual_transform);
+                                if screen_bounds.contains(pos) {
+                                    grip.is_dragging = true;
+                                    self.initial_position = self.screen_position();
+                                    self.initial_size = self.actual_local_size();
+                                    self.mouse_click_pos = pos;
+                                    ui.capture_mouse(self.handle());
+                                    break;
+                                }
                             }
                         }
                     }
@@ -490,54 +508,61 @@ impl Control for Window {
                     &WidgetMessage::MouseMove { pos, .. } => {
                         let mut new_cursor = None;
 
-                        for grip in self.grips.borrow().iter() {
-                            let offset = self.screen_position();
-                            let screen_bounds = grip.bounds.translate(offset);
-                            if grip.is_dragging || screen_bounds.contains(pos) {
-                                new_cursor = Some(grip.cursor);
-                            }
-
-                            if grip.is_dragging {
-                                let delta = self.mouse_click_pos - pos;
-                                let (dx, dy, dw, dh) = match grip.kind {
-                                    GripKind::Left => (-1.0, 0.0, 1.0, 0.0),
-                                    GripKind::Top => (0.0, -1.0, 0.0, 1.0),
-                                    GripKind::Right => (0.0, 0.0, -1.0, 0.0),
-                                    GripKind::Bottom => (0.0, 0.0, 0.0, -1.0),
-                                    GripKind::LeftTopCorner => (-1.0, -1.0, 1.0, 1.0),
-                                    GripKind::RightTopCorner => (0.0, -1.0, -1.0, 1.0),
-                                    GripKind::RightBottomCorner => (0.0, 0.0, -1.0, -1.0),
-                                    GripKind::LeftBottomCorner => (-1.0, 0.0, 1.0, -1.0),
-                                };
-
-                                let new_pos = self.initial_position
-                                    + Vector2::new(delta.x * dx, delta.y * dy);
-                                let new_size =
-                                    self.initial_size + Vector2::new(delta.x * dw, delta.y * dh);
-
-                                if new_size.x > self.min_width()
-                                    && new_size.x < self.max_width()
-                                    && new_size.y > self.min_height()
-                                    && new_size.y < self.max_height()
-                                {
-                                    ui.send_message(WidgetMessage::desired_position(
-                                        self.handle(),
-                                        MessageDirection::ToWidget,
-                                        ui.screen_to_root_canvas_space(new_pos),
-                                    ));
-                                    ui.send_message(WidgetMessage::width(
-                                        self.handle(),
-                                        MessageDirection::ToWidget,
-                                        new_size.x,
-                                    ));
-                                    ui.send_message(WidgetMessage::height(
-                                        self.handle(),
-                                        MessageDirection::ToWidget,
-                                        new_size.y,
-                                    ));
+                        if !self.maximized() {
+                            for grip in self.grips.borrow().iter() {
+                                let screen_bounds = grip.bounds.transform(&self.visual_transform);
+                                if grip.is_dragging || screen_bounds.contains(pos) {
+                                    new_cursor = Some(grip.cursor);
                                 }
 
-                                break;
+                                if grip.is_dragging {
+                                    let delta = self.mouse_click_pos - pos;
+                                    let (dx, dy, dw, dh) = match grip.kind {
+                                        GripKind::Left => (-1.0, 0.0, 1.0, 0.0),
+                                        GripKind::Top => (0.0, -1.0, 0.0, 1.0),
+                                        GripKind::Right => (0.0, 0.0, -1.0, 0.0),
+                                        GripKind::Bottom => (0.0, 0.0, 0.0, -1.0),
+                                        GripKind::LeftTopCorner => (-1.0, -1.0, 1.0, 1.0),
+                                        GripKind::RightTopCorner => (0.0, -1.0, -1.0, 1.0),
+                                        GripKind::RightBottomCorner => (0.0, 0.0, -1.0, -1.0),
+                                        GripKind::LeftBottomCorner => (-1.0, 0.0, 1.0, -1.0),
+                                    };
+
+                                    let new_pos = if self.minimized() {
+                                        self.initial_position + Vector2::new(delta.x * dx, 0.0)
+                                    } else {
+                                        self.initial_position
+                                            + Vector2::new(delta.x * dx, delta.y * dy)
+                                    };
+                                    let new_size = self.initial_size
+                                        + Vector2::new(delta.x * dw, delta.y * dh);
+
+                                    if new_size.x > self.min_width()
+                                        && new_size.x < self.max_width()
+                                        && new_size.y > self.min_height()
+                                        && new_size.y < self.max_height()
+                                    {
+                                        ui.send_message(WidgetMessage::desired_position(
+                                            self.handle(),
+                                            MessageDirection::ToWidget,
+                                            ui.screen_to_root_canvas_space(new_pos),
+                                        ));
+                                        ui.send_message(WidgetMessage::width(
+                                            self.handle(),
+                                            MessageDirection::ToWidget,
+                                            new_size.x,
+                                        ));
+                                        if !self.minimized() {
+                                            ui.send_message(WidgetMessage::height(
+                                                self.handle(),
+                                                MessageDirection::ToWidget,
+                                                new_size.y,
+                                            ));
+                                        }
+                                    }
+
+                                    break;
+                                }
                             }
                         }
 
@@ -554,6 +579,7 @@ impl Control for Window {
                 || ui
                     .node(self.header)
                     .has_descendant(message.destination(), ui))
+                && !self.maximized()
                 && !message.handled()
                 && !self.has_active_grip()
             {
@@ -614,12 +640,13 @@ impl Control for Window {
                 ui.send_message(WindowMessage::minimize(
                     self.handle(),
                     MessageDirection::ToWidget,
-                    !self.minimized,
+                    !self.minimized(),
                 ));
             } else if message.destination() == self.maximize_button {
                 ui.send_message(WindowMessage::maximize(
                     self.handle(),
                     MessageDirection::ToWidget,
+                    !self.maximized(),
                 ));
             } else if message.destination() == self.close_button {
                 ui.send_message(WindowMessage::close(
@@ -636,28 +663,41 @@ impl Control for Window {
                         center,
                         focus_content,
                     } => {
-                        if !self.visibility() {
+                        // Only manage this window's visibility if it is at the root.
+                        // Otherwise it is part of something like a tile, and that parent should decide
+                        // whether the window is visible.
+                        if !self.visibility() && self.parent() == ui.root() {
                             ui.send_message(WidgetMessage::visibility(
                                 self.handle(),
                                 MessageDirection::ToWidget,
                                 true,
                             ));
-                            ui.send_message(WidgetMessage::topmost(
+                            // If we are opening the window with non-finite width and height, something
+                            // has gone wrong, so correct it.
+                            if !self.width().is_finite() {
+                                Log::err(format!("Window width was {}", self.width()));
+                                self.set_width(200.0);
+                            }
+                            if !self.height().is_finite() {
+                                Log::err(format!("Window height was {}", self.height()));
+                                self.set_height(200.0);
+                            }
+                        }
+                        ui.send_message(WidgetMessage::topmost(
+                            self.handle(),
+                            MessageDirection::ToWidget,
+                        ));
+                        if focus_content {
+                            ui.send_message(WidgetMessage::focus(
+                                self.content_to_focus(),
+                                MessageDirection::ToWidget,
+                            ));
+                        }
+                        if center && self.parent() == ui.root() {
+                            ui.send_message(WidgetMessage::center(
                                 self.handle(),
                                 MessageDirection::ToWidget,
                             ));
-                            if center {
-                                ui.send_message(WidgetMessage::center(
-                                    self.handle(),
-                                    MessageDirection::ToWidget,
-                                ));
-                            }
-                            if focus_content {
-                                ui.send_message(WidgetMessage::focus(
-                                    self.content_to_focus(),
-                                    MessageDirection::ToWidget,
-                                ));
-                            }
                         }
                     }
                     &WindowMessage::OpenAt {
@@ -776,47 +816,18 @@ impl Control for Window {
                         }
                     }
                     &WindowMessage::Minimize(minimized) => {
-                        if self.minimized != minimized {
-                            self.minimized = minimized;
-                            if self.content.is_some() {
-                                ui.send_message(WidgetMessage::visibility(
-                                    self.content,
-                                    MessageDirection::ToWidget,
-                                    !minimized,
-                                ));
-                            }
+                        if minimized {
+                            self.update_size_state(WindowSizeState::Minimized, ui);
+                        } else {
+                            self.update_size_state(WindowSizeState::Normal, ui);
                         }
                     }
-                    WindowMessage::Maximize => {
-                        let current_size = self.actual_local_size();
-                        let current_position = self.actual_local_position();
-                        let new_bounds = self
-                            .prev_bounds
-                            .replace(Rect::new(
-                                current_position.x,
-                                current_position.y,
-                                current_size.x,
-                                current_size.y,
-                            ))
-                            .unwrap_or_else(|| {
-                                Rect::new(0.0, 0.0, ui.screen_size.x, ui.screen_size.y)
-                            });
-
-                        ui.send_message(WidgetMessage::desired_position(
-                            self.handle,
-                            MessageDirection::ToWidget,
-                            new_bounds.position,
-                        ));
-                        ui.send_message(WidgetMessage::width(
-                            self.handle,
-                            MessageDirection::ToWidget,
-                            new_bounds.w(),
-                        ));
-                        ui.send_message(WidgetMessage::height(
-                            self.handle,
-                            MessageDirection::ToWidget,
-                            new_bounds.h(),
-                        ));
+                    &WindowMessage::Maximize(maximized) => {
+                        if maximized {
+                            self.update_size_state(WindowSizeState::Maximized, ui);
+                        } else {
+                            self.update_size_state(WindowSizeState::Normal, ui);
+                        }
                     }
                     &WindowMessage::CanMinimize(value) => {
                         if self.can_minimize != value {
@@ -878,17 +889,20 @@ impl Control for Window {
                             self.initial_position = initial_position;
                             self.is_dragging = true;
 
-                            if let Some(prev_bounds) = self.prev_bounds.take() {
-                                ui.send_message(WidgetMessage::width(
-                                    self.handle,
-                                    MessageDirection::ToWidget,
-                                    prev_bounds.w(),
-                                ));
-                                ui.send_message(WidgetMessage::height(
-                                    self.handle,
-                                    MessageDirection::ToWidget,
-                                    prev_bounds.h(),
-                                ));
+                            if self.size_state == WindowSizeState::Maximized {
+                                self.size_state = WindowSizeState::Normal;
+                                if let Some(prev_bounds) = self.prev_bounds.take() {
+                                    ui.send_message(WidgetMessage::width(
+                                        self.handle,
+                                        MessageDirection::ToWidget,
+                                        prev_bounds.w(),
+                                    ));
+                                    ui.send_message(WidgetMessage::height(
+                                        self.handle,
+                                        MessageDirection::ToWidget,
+                                        prev_bounds.h(),
+                                    ));
+                                }
                             }
 
                             ui.send_message(message.reverse());
@@ -989,6 +1003,96 @@ impl Control for Window {
 }
 
 impl Window {
+    pub fn tab_label(&self) -> &str {
+        &self.tab_label
+    }
+    pub fn minimized(&self) -> bool {
+        self.size_state == WindowSizeState::Minimized
+    }
+    pub fn maximized(&self) -> bool {
+        self.size_state == WindowSizeState::Maximized
+    }
+    pub fn normal(&self) -> bool {
+        self.size_state == WindowSizeState::Normal
+    }
+    fn update_size_state(&mut self, new_state: WindowSizeState, ui: &mut UserInterface) {
+        if self.size_state == new_state {
+            return;
+        }
+        if new_state == WindowSizeState::Maximized && !self.can_resize {
+            return;
+        }
+        let current_size = self.actual_global_size();
+        let current_position = self.screen_position();
+        match self.size_state {
+            WindowSizeState::Normal => {
+                self.prev_bounds = Some(Rect::new(
+                    current_position.x,
+                    current_position.y,
+                    current_size.x,
+                    current_size.y,
+                ));
+            }
+            WindowSizeState::Minimized => {
+                self.prev_bounds = Some(Rect::new(
+                    current_position.x,
+                    current_position.y,
+                    current_size.x,
+                    self.prev_bounds.map(|b| b.size.y).unwrap_or(current_size.y),
+                ));
+            }
+            _ => (),
+        }
+        let new_bounds = match new_state {
+            WindowSizeState::Normal | WindowSizeState::Minimized => {
+                self.prev_bounds.unwrap_or_else(|| {
+                    Rect::new(
+                        current_position.x,
+                        current_position.y,
+                        current_size.x,
+                        current_size.y,
+                    )
+                })
+            }
+            WindowSizeState::Maximized => Rect::new(0.0, 0.0, ui.screen_size.x, ui.screen_size.y),
+        };
+
+        if self.content.is_some() {
+            ui.send_message(WidgetMessage::visibility(
+                self.content,
+                MessageDirection::ToWidget,
+                new_state != WindowSizeState::Minimized,
+            ));
+        }
+
+        if new_state == WindowSizeState::Minimized {
+            self.set_desired_local_position(new_bounds.position);
+            if self.can_resize {
+                self.set_width(new_bounds.w());
+            }
+            self.set_height(f32::NAN);
+            self.invalidate_layout();
+        } else {
+            ui.send_message(WidgetMessage::desired_position(
+                self.handle,
+                MessageDirection::ToWidget,
+                new_bounds.position,
+            ));
+            if self.can_resize {
+                ui.send_message(WidgetMessage::width(
+                    self.handle,
+                    MessageDirection::ToWidget,
+                    new_bounds.w(),
+                ));
+                ui.send_message(WidgetMessage::height(
+                    self.handle,
+                    MessageDirection::ToWidget,
+                    new_bounds.h(),
+                ));
+            }
+        }
+        self.size_state = new_state;
+    }
     /// Checks whether any resizing grip is active or not.
     pub fn has_active_grip(&self) -> bool {
         for grip in self.grips.borrow().iter() {
@@ -1020,6 +1124,8 @@ pub struct WindowBuilder {
     pub content: Handle<UiNode>,
     /// Optional title of the window.
     pub title: Option<WindowTitle>,
+    /// Label for the window's tab.
+    pub tab_label: String,
     /// Whether the window can be closed or not.
     pub can_close: bool,
     /// Whether the window can be minimized or not.
@@ -1228,6 +1334,7 @@ impl WindowBuilder {
             widget_builder,
             content: Handle::NONE,
             title: None,
+            tab_label: String::default(),
             can_close: true,
             can_minimize: true,
             can_maximize: true,
@@ -1252,6 +1359,11 @@ impl WindowBuilder {
     /// Sets a desired window title.
     pub fn with_title(mut self, title: WindowTitle) -> Self {
         self.title = Some(title);
+        self
+    }
+
+    pub fn with_tab_label<S: Into<String>>(mut self, label: S) -> Self {
+        self.tab_label = label.into();
         self
     }
 
@@ -1448,12 +1560,13 @@ impl WindowBuilder {
             initial_position: Vector2::default(),
             initial_size: Default::default(),
             is_dragging: false,
-            minimized: false,
+            size_state: WindowSizeState::default(),
             can_minimize: self.can_minimize,
             can_maximize: self.can_maximize,
             can_close: self.can_close,
             can_resize: self.can_resize,
             header,
+            tab_label: self.tab_label,
             minimize_button,
             maximize_button,
             close_button,

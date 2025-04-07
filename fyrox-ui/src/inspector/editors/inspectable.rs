@@ -44,11 +44,11 @@ use std::{
 /// A general-purpose property editor definition that creates
 /// a nested inspector within an [Expander](crate::expander::Expander) widget to allow the user
 /// to edited properties of type T.
-/// The expander is labeled with [FieldInfo::display_name].
+/// The expander is labeled with [FieldMetadata::display_name].
 /// The layer_index for the inner inspector is increased by 1.
 pub struct InspectablePropertyEditorDefinition<T>
 where
-    T: Reflect + 'static,
+    T: Reflect,
 {
     #[allow(dead_code)]
     phantom: PhantomDataSendSync<T>,
@@ -56,7 +56,7 @@ where
 
 impl<T> InspectablePropertyEditorDefinition<T>
 where
-    T: Reflect + 'static,
+    T: Reflect,
 {
     pub fn new() -> Self {
         Self {
@@ -67,7 +67,7 @@ where
 
 impl<T> Debug for InspectablePropertyEditorDefinition<T>
 where
-    T: Reflect + 'static,
+    T: Reflect,
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "InspectablePropertyEditorDefinition")
@@ -76,7 +76,7 @@ where
 
 impl<T> PropertyEditorDefinition for InspectablePropertyEditorDefinition<T>
 where
-    T: Reflect + 'static,
+    T: Reflect,
 {
     fn value_type_id(&self) -> TypeId {
         TypeId::of::<T>()
@@ -160,7 +160,7 @@ where
             if ctx.message.direction() == MessageDirection::FromWidget {
                 return Some(PropertyChanged {
                     name: ctx.name.to_owned(),
-                    owner_type_id: ctx.owner_type_id,
+
                     value: FieldKind::Inspectable(Box::new(msg.clone())),
                 });
             }

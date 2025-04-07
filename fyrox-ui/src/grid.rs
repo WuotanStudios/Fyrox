@@ -35,6 +35,7 @@ use crate::{
     BuildContext, Control, UiNode, UserInterface,
 };
 use core::f32;
+
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
 use fyrox_graph::BaseSceneGraph;
 use std::{
@@ -239,6 +240,7 @@ pub type Row = GridDimension;
 /// in it to be valid. For example you can add a column and set it to a specific size via strict to provide spacing between
 /// two other columns.
 #[derive(Default, Clone, Visit, Reflect, Debug, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct Grid {
     /// Base widget of the grid.
     pub widget: Widget,
@@ -474,7 +476,7 @@ impl Grid {
             let Some(row) = rows.get_mut(node.row()) else {
                 Log::err(format!(
                     "Node row out of bounds: {} row:{}, column:{}",
-                    node.type_name(),
+                    Reflect::type_name(node),
                     node.row(),
                     node.column()
                 ));
@@ -483,7 +485,7 @@ impl Grid {
             let Some(col) = cols.get_mut(node.column()) else {
                 Log::err(format!(
                     "Node column out of bounds: {} row:{}, column:{}",
-                    node.type_name(),
+                    Reflect::type_name(node),
                     node.row(),
                     node.column()
                 ));

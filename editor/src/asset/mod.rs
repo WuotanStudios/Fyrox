@@ -31,19 +31,15 @@ use crate::{
     fyrox::{
         asset::{
             manager::ResourceManager,
-            state::ResourceState,
-            untyped::{ResourceHeader, ResourceKind, UntypedResource},
+            untyped::{ResourceKind, UntypedResource},
         },
-        core::{
-            futures::executor::block_on, log::Log, make_relative_path,
-            parking_lot::lock_api::Mutex, pool::Handle, TypeUuidProvider, Uuid,
-        },
+        core::{futures::executor::block_on, log::Log, make_relative_path, pool::Handle, Uuid},
         engine::Engine,
         graph::BaseSceneGraph,
         gui::{
-            border::BorderBuilder,
             button::{ButtonBuilder, ButtonMessage},
             copypasta::ClipboardProvider,
+            dock::{DockingManagerBuilder, TileBuilder, TileContent},
             file_browser::{FileBrowserBuilder, FileBrowserMessage, Filter},
             grid::{Column, GridBuilder, Row},
             list_view::{ListViewBuilder, ListViewMessage},
@@ -55,15 +51,15 @@ use crate::{
             stack_panel::StackPanelBuilder,
             text::TextMessage,
             text_box::TextBoxBuilder,
-            utils::make_simple_tooltip,
+            utils::{
+                make_dropdown_list_option, make_image_button_with_tooltip, make_simple_tooltip,
+            },
             widget::{WidgetBuilder, WidgetMessage},
             window::{WindowBuilder, WindowMessage, WindowTitle},
             wrap_panel::WrapPanelBuilder,
             BuildContext, HorizontalAlignment, Orientation, RcUiNodeHandle, Thickness, UiNode,
             UserInterface, VerticalAlignment,
         },
-        resource::{model::Model, texture::Texture},
-        scene::sound::SoundBuffer,
         walkdir,
     },
     load_image,
@@ -72,18 +68,15 @@ use crate::{
     utils::window_content,
     Message, Mode,
 };
-use fyrox::gui::style::resource::StyleResourceExt;
-use fyrox::gui::style::Style;
-use fyrox::gui::utils::{make_dropdown_list_option, make_image_button_with_tooltip};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use std::fs::File;
-use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     ffi::OsStr,
+    fs::File,
+    io::Write,
     path::{Path, PathBuf},
     process::Command,
     sync::{
+        atomic::{AtomicBool, Ordering},
         mpsc::{self, Sender},
         Arc,
     },
@@ -243,48 +236,43 @@ impl ContextMenu {
                     item.open();
                 } else if message.destination() == self.duplicate {
                     if let Some(resource) = item.untyped_resource() {
-                        match resource.kind() {
-                            ResourceKind::External(path) => {
-                                if let Some(built_in) = engine
-                                    .resource_manager
-                                    .state()
-                                    .built_in_resources
-                                    .get(&path)
-                                {
-                                    if let Some(data_source) = built_in.data_source.as_ref() {
-                                        let final_copy_path = make_unique_path(
-                                            Path::new("."),
-                                            path.to_str().unwrap(),
-                                            &data_source.extension,
-                                        );
+                        if let Some(path) = engine.resource_manager.resource_path(&resource) {
+                            if let Some(built_in) = engine
+                                .resource_manager
+                                .state()
+                                .built_in_resources
+                                .get(&path)
+                            {
+                                if let Some(data_source) = built_in.data_source.as_ref() {
+                                    let final_copy_path = make_unique_path(
+                                        Path::new("."),
+                                        path.to_str().unwrap(),
+                                        &data_source.extension,
+                                    );
 
-                                        match File::create(&final_copy_path) {
-                                            Ok(mut file) => {
-                                                Log::verify(file.write_all(&data_source.bytes));
-                                            }
-                                            Err(err) => {
-                                                Log::err(format!(
-                                                "Failed to create a file for resource at path {}. \
-                                                Reason: {:?}", final_copy_path.display(), err
-                                            ))
-                                            }
+                                    match File::create(&final_copy_path) {
+                                        Ok(mut file) => {
+                                            Log::verify(file.write_all(&data_source.bytes));
                                         }
-                                    }
-                                } else if let Ok(canonical_path) = path.canonicalize() {
-                                    if let (Some(parent), Some(stem), Some(ext)) = (
-                                        canonical_path.parent(),
-                                        canonical_path.file_stem(),
-                                        canonical_path.extension(),
-                                    ) {
-                                        let stem = stem.to_string_lossy().to_string();
-                                        let ext = ext.to_string_lossy().to_string();
-                                        let final_copy_path = make_unique_path(parent, &stem, &ext);
-                                        Log::verify(std::fs::copy(canonical_path, final_copy_path));
+                                        Err(err) => Log::err(format!(
+                                            "Failed to create a file for resource at path {}. \
+                                                Reason: {:?}",
+                                            final_copy_path.display(),
+                                            err
+                                        )),
                                     }
                                 }
-                            }
-                            ResourceKind::Embedded => {
-                                // TODO: Support duplicating embedded resources.
+                            } else if let Ok(canonical_path) = path.canonicalize() {
+                                if let (Some(parent), Some(stem), Some(ext)) = (
+                                    canonical_path.parent(),
+                                    canonical_path.file_stem(),
+                                    canonical_path.extension(),
+                                ) {
+                                    let stem = stem.to_string_lossy().to_string();
+                                    let ext = ext.to_string_lossy().to_string();
+                                    let final_copy_path = make_unique_path(parent, &stem, &ext);
+                                    Log::verify(std::fs::copy(canonical_path, final_copy_path));
+                                }
                             }
                         }
                     }
@@ -452,8 +440,8 @@ impl ResourceCreator {
                     .supported_resource_data_uuids
                     .get(self.selected.unwrap_or_default())
                 {
-                    if let Some(loader) = resource_manager_state
-                        .loaders
+                    let loaders = resource_manager_state.loaders.lock();
+                    if let Some(loader) = loaders
                         .iter()
                         .find(|loader| &loader.data_type_uuid() == data_type_uuid)
                     {
@@ -472,7 +460,7 @@ impl ResourceCreator {
                                     self.name_str.clone(),
                                 ));
                         }
-                    }
+                    };
                 }
             }
         } else if let Some(ButtonMessage::Click) = message.data() {
@@ -489,20 +477,16 @@ impl ResourceCreator {
                     let path = base_path.join(&self.name_str);
                     match instance.save(&path) {
                         Ok(_) => {
-                            let resource = UntypedResource(Arc::new(Mutex::new(ResourceHeader {
-                                kind: ResourceKind::External(path.clone()),
-                                type_uuid: instance.type_uuid(),
-                                state: ResourceState::Ok(instance),
-                            })));
+                            let resource = UntypedResource::new_ok_untyped(
+                                Uuid::new_v4(),
+                                ResourceKind::External,
+                                instance,
+                            );
 
                             drop(constructors);
                             drop(resource_manager_state);
 
-                            Log::verify(engine.resource_manager.register(
-                                resource,
-                                path,
-                                |_, _| true,
-                            ));
+                            Log::verify(engine.resource_manager.register(resource, path));
 
                             sender.send(Message::ForceSync);
 
@@ -536,6 +520,7 @@ impl ResourceCreator {
 
 pub struct AssetBrowser {
     pub window: Handle<UiNode>,
+    pub docking_manager: Handle<UiNode>,
     content_panel: Handle<UiNode>,
     folder_browser: Handle<UiNode>,
     scroll_panel: Handle<UiNode>,
@@ -547,13 +532,15 @@ pub struct AssetBrowser {
     item_to_select: Option<PathBuf>,
     inspector: AssetInspector,
     context_menu: ContextMenu,
-    selected_path: PathBuf,
+    current_path: PathBuf,
+    selected_item_path: PathBuf,
     watcher: Option<RecommendedWatcher>,
     dependency_viewer: DependencyViewer,
     resource_creator: Option<ResourceCreator>,
     preview_cache: AssetPreviewCache,
     preview_sender: Sender<IconRequest>,
     need_refresh: Arc<AtomicBool>,
+    main_window: Handle<UiNode>,
     pub preview_generators: AssetPreviewGeneratorsCollection,
 }
 
@@ -565,6 +552,7 @@ fn is_supported_resource(ext: &OsStr, resource_manager: &ResourceManager) -> boo
     resource_manager
         .state()
         .loaders
+        .lock()
         .iter()
         .any(|loader| loader.supports_extension(ext))
 }
@@ -609,8 +597,8 @@ impl AssetBrowser {
         let add_resource = ButtonBuilder::new(
             WidgetBuilder::new()
                 .with_tab_index(Some(1))
-                .with_height(20.0)
-                .with_width(20.0)
+                .with_height(24.0)
+                .with_width(24.0)
                 .with_margin(Thickness::uniform(1.0))
                 .with_tooltip(make_simple_tooltip(ctx, "Add New Resource")),
         )
@@ -651,88 +639,110 @@ impl AssetBrowser {
         let content_panel;
         let folder_browser;
         let scroll_panel;
-        let window = WindowBuilder::new(WidgetBuilder::new().with_name("AssetBrowser"))
+        let folder_browser_window = WindowBuilder::new(WidgetBuilder::new())
+            .with_title(WindowTitle::text("Folders"))
+            .with_tab_label("Folders")
+            .can_close(false)
             .can_minimize(false)
-            .with_title(WindowTitle::text("Asset Browser"))
+            .can_maximize(false)
+            .with_content({
+                folder_browser = FileBrowserBuilder::new(
+                    WidgetBuilder::new().on_column(0).with_tab_index(Some(0)),
+                )
+                .with_show_path(false)
+                .with_filter(Filter::new(|p: &Path| p.is_dir()))
+                .build(ctx);
+                folder_browser
+            })
+            .build(ctx);
+
+        let main_window = WindowBuilder::new(WidgetBuilder::new())
+            .with_title(WindowTitle::text("Folder Content"))
+            .with_tab_label("Content")
+            .can_close(false)
+            .can_minimize(false)
+            .can_maximize(false)
             .with_content(
                 GridBuilder::new(
                     WidgetBuilder::new()
-                        .with_child(
-                            BorderBuilder::new(
-                                WidgetBuilder::new()
-                                    .with_background(ctx.style.property(Style::BRUSH_DARK))
-                                    .with_child({
-                                        folder_browser = FileBrowserBuilder::new(
-                                            WidgetBuilder::new()
-                                                .on_column(0)
-                                                .with_tab_index(Some(0)),
-                                        )
-                                        .with_show_path(false)
-                                        .with_filter(Filter::new(|p: &Path| p.is_dir()))
-                                        .build(ctx);
-                                        folder_browser
-                                    }),
-                            )
-                            .build(ctx),
-                        )
-                        .with_child(
-                            GridBuilder::new(
-                                WidgetBuilder::new()
-                                    .on_column(1)
-                                    .with_child(toolbar)
-                                    .with_child({
-                                        scroll_panel = ScrollViewerBuilder::new(
-                                            WidgetBuilder::new().on_row(1),
-                                        )
-                                        .with_content({
-                                            content_panel = WrapPanelBuilder::new(
-                                                WidgetBuilder::new()
-                                                    .with_horizontal_alignment(
-                                                        HorizontalAlignment::Left,
-                                                    )
-                                                    .with_vertical_alignment(
-                                                        VerticalAlignment::Top,
-                                                    ),
-                                            )
-                                            .with_orientation(Orientation::Horizontal)
-                                            .build(ctx);
-                                            content_panel
-                                        })
-                                        .build(ctx);
-                                        scroll_panel
-                                    }),
-                            )
-                            .add_row(Row::auto())
-                            .add_row(Row::stretch())
-                            .add_column(Column::stretch())
-                            .build(ctx),
-                        )
-                        .with_child(
-                            BorderBuilder::new(
-                                WidgetBuilder::new()
-                                    .on_column(2)
-                                    .with_foreground(ctx.style.property(Style::BRUSH_LIGHTER))
-                                    .with_child(
-                                        GridBuilder::new(
-                                            WidgetBuilder::new()
-                                                .with_child(preview.root)
-                                                .with_child(inspector.container),
-                                        )
-                                        .add_column(Column::stretch())
-                                        .add_row(Row::stretch())
-                                        .add_row(Row::stretch())
-                                        .build(ctx),
-                                    ),
-                            )
-                            .build(ctx),
-                        ),
+                        .on_column(1)
+                        .with_child(toolbar)
+                        .with_child({
+                            scroll_panel = ScrollViewerBuilder::new(WidgetBuilder::new().on_row(1))
+                                .with_content({
+                                    content_panel = WrapPanelBuilder::new(
+                                        WidgetBuilder::new()
+                                            .with_horizontal_alignment(HorizontalAlignment::Left)
+                                            .with_vertical_alignment(VerticalAlignment::Top),
+                                    )
+                                    .with_orientation(Orientation::Horizontal)
+                                    .build(ctx);
+                                    content_panel
+                                })
+                                .build(ctx);
+                            scroll_panel
+                        }),
                 )
-                .add_column(Column::strict(250.0))
+                .add_row(Row::auto())
+                .add_row(Row::stretch())
                 .add_column(Column::stretch())
-                .add_column(Column::strict(250.0))
+                .build(ctx),
+            )
+            .build(ctx);
+
+        let preview_window = WindowBuilder::new(WidgetBuilder::new())
+            .with_title(WindowTitle::text("Asset Preview"))
+            .with_tab_label("Preview")
+            .can_close(false)
+            .can_minimize(false)
+            .can_maximize(false)
+            .with_content(
+                GridBuilder::new(
+                    WidgetBuilder::new()
+                        .with_child(preview.root)
+                        .with_child(inspector.container),
+                )
+                .add_column(Column::stretch())
+                .add_row(Row::stretch())
                 .add_row(Row::stretch())
                 .build(ctx),
             )
+            .build(ctx);
+
+        let docking_manager = DockingManagerBuilder::new(
+            WidgetBuilder::new().with_child(
+                TileBuilder::new(WidgetBuilder::new())
+                    .with_content(TileContent::HorizontalTiles {
+                        splitter: 0.25,
+                        tiles: [
+                            TileBuilder::new(WidgetBuilder::new())
+                                .with_content(TileContent::Window(folder_browser_window))
+                                .build(ctx),
+                            TileBuilder::new(WidgetBuilder::new())
+                                .with_content(TileContent::HorizontalTiles {
+                                    splitter: 0.75,
+                                    tiles: [
+                                        TileBuilder::new(WidgetBuilder::new())
+                                            .with_content(TileContent::Window(main_window))
+                                            .build(ctx),
+                                        TileBuilder::new(WidgetBuilder::new())
+                                            .with_content(TileContent::Window(preview_window))
+                                            .build(ctx),
+                                    ],
+                                })
+                                .build(ctx),
+                        ],
+                    })
+                    .build(ctx),
+            ),
+        )
+        .build(ctx);
+
+        let window = WindowBuilder::new(WidgetBuilder::new().with_name("AssetBrowser"))
+            .can_minimize(false)
+            .with_title(WindowTitle::text("Asset Browser"))
+            .with_tab_label("Asset Browser")
+            .with_content(docking_manager)
             .build(ctx);
 
         let context_menu = ContextMenu::new(ctx);
@@ -748,6 +758,7 @@ impl AssetBrowser {
         Self {
             dependency_viewer,
             window,
+            docking_manager,
             content_panel,
             folder_browser,
             preview,
@@ -757,15 +768,17 @@ impl AssetBrowser {
             item_to_select: None,
             inspector,
             context_menu,
-            selected_path: Default::default(),
+            current_path: Default::default(),
             add_resource,
             resource_creator: None,
             preview_cache: AssetPreviewCache::new(preview_receiver, 4),
             preview_sender,
             need_refresh,
+            main_window,
             preview_generators: AssetPreviewGeneratorsCollection::new(),
             refresh,
             watcher,
+            selected_item_path: Default::default(),
         }
     }
 
@@ -887,8 +900,8 @@ impl AssetBrowser {
     ) {
         if let Some(watcher) = self.watcher.as_mut() {
             // notify 6.1.1 crashes otherwise
-            if self.selected_path.exists() {
-                Log::verify(watcher.unwatch(&self.selected_path));
+            if self.current_path.exists() {
+                Log::verify(watcher.unwatch(&self.current_path));
             }
             if path.exists() {
                 Log::verify(watcher.watch(path, RecursiveMode::NonRecursive));
@@ -897,7 +910,12 @@ impl AssetBrowser {
             }
         }
 
-        self.selected_path = path.to_path_buf();
+        self.current_path = path.to_path_buf();
+        ui.send_message(WindowMessage::title(
+            self.main_window,
+            MessageDirection::ToWidget,
+            WindowTitle::text(format!("Folder Content - {}", self.current_path.display())),
+        ));
         self.refresh(ui, resource_manager, message_sender);
     }
 
@@ -914,7 +932,7 @@ impl AssetBrowser {
         self.clear_assets(ui);
 
         // Add "return" item.
-        if let Some(mut parent_path) = make_relative_path(&self.selected_path)
+        if let Some(mut parent_path) = make_relative_path(&self.current_path)
             .ok()
             .and_then(|path| path.parent().map(|path| path.to_owned()))
         {
@@ -946,14 +964,14 @@ impl AssetBrowser {
         let mut resources = Vec::new();
 
         // Get all supported assets from folder and generate previews for them.
-        if let Ok(dir_iter) = std::fs::read_dir(&self.selected_path) {
+        if let Ok(dir_iter) = std::fs::read_dir(&self.current_path) {
             for entry in dir_iter.flatten() {
                 if let Ok(entry_path) = make_relative_path(entry.path()) {
                     if entry_path.is_dir() {
                         folders.push(entry_path);
                     } else if entry_path
                         .extension()
-                        .map_or(false, |ext| is_supported_resource(ext, resource_manager))
+                        .is_some_and(|ext| is_supported_resource(ext, resource_manager))
                     {
                         resources.push(entry_path);
                     }
@@ -962,7 +980,7 @@ impl AssetBrowser {
         }
 
         // Collect built-in resource (only if the root folder is selected).
-        if let Ok(path) = self.selected_path.canonicalize() {
+        if let Ok(path) = self.current_path.canonicalize() {
             if let Ok(working_dir) = std::env::current_dir().and_then(|dir| dir.canonicalize()) {
                 if path == working_dir {
                     let built_in_resources = resource_manager
@@ -1028,7 +1046,7 @@ impl AssetBrowser {
                 message,
                 engine,
                 sender.clone(),
-                &self.selected_path,
+                &self.current_path,
             );
             if asset_added {
                 self.refresh(
@@ -1058,6 +1076,8 @@ impl AssetBrowser {
                 .path
                 .clone();
 
+            self.selected_item_path = asset_path.clone();
+
             self.inspector.inspect_resource_import_options(
                 &asset_path,
                 ui,
@@ -1066,8 +1086,9 @@ impl AssetBrowser {
             );
 
             if let Ok(resource) = block_on(engine.resource_manager.request_untyped(asset_path)) {
-                if let Some(preview_generator) =
-                    self.preview_generators.map.get_mut(&resource.type_uuid())
+                if let Some(preview_generator) = resource
+                    .type_uuid()
+                    .and_then(|type_uuid| self.preview_generators.map.get_mut(&type_uuid))
                 {
                     let preview_scene = &mut engine.scenes[self.preview.scene()];
                     let preview = preview_generator.generate_scene(
@@ -1075,6 +1096,11 @@ impl AssetBrowser {
                         &engine.resource_manager,
                         preview_scene,
                     );
+                    ui.send_message(WidgetMessage::visibility(
+                        self.preview.root,
+                        MessageDirection::ToWidget,
+                        preview.is_some(),
+                    ));
                     self.preview.set_model(preview, engine);
                 }
             }
@@ -1114,7 +1140,8 @@ impl AssetBrowser {
                 && message.direction() == MessageDirection::FromWidget
             {
                 if search_text.is_empty() {
-                    let path = self.selected_path.clone();
+                    let path = self.selected_item_path.parent().unwrap().to_path_buf();
+                    self.item_to_select = Some(self.selected_item_path.clone());
                     self.set_path(&path, ui, &engine.resource_manager, &sender);
                 } else {
                     self.clear_assets(ui);
@@ -1176,8 +1203,11 @@ impl AssetBrowser {
                     if let Ok(resource) =
                         block_on(engine.resource_manager.request_untyped(&item.path))
                     {
-                        self.dependency_viewer
-                            .open(&resource, engine.user_interfaces.first_mut());
+                        self.dependency_viewer.open(
+                            &resource,
+                            &engine.resource_manager,
+                            engine.user_interfaces.first_mut(),
+                        );
                     }
                 }
             }
@@ -1256,44 +1286,15 @@ impl AssetBrowser {
         resource_manager: &ResourceManager,
         message_sender: &MessageSender,
     ) {
-        fn filter(res: &UntypedResource) -> bool {
-            if [Texture::type_uuid(), SoundBuffer::type_uuid()].contains(&res.type_uuid()) {
-                return false;
-            };
-
-            // The engine cannot write FBX resources, so we must filter out these and warn the user
-            // that resource references cannot be automatically fixed.
-            if let Some(model) = res.try_cast::<Model>() {
-                let kind = model.kind();
-                if let Some(ext) = kind.path().and_then(|path| {
-                    path.extension()
-                        .map(|ext| ext.to_string_lossy().to_lowercase())
-                }) {
-                    if ext == "fbx" {
-                        Log::warn(format!(
-                            "Resource {kind} cannot be scanned for \
-                        references, because FBX cannot be exported."
-                        ));
-                        return false;
-                    }
-                }
-            }
-
-            true
-        }
-
         if let Some(item) = ui.try_get(dropped).and_then(|n| n.cast::<AssetItem>()) {
             if let Ok(relative_path) = make_relative_path(target_dir) {
                 if let Ok(resource) = block_on(resource_manager.request_untyped(&item.path)) {
-                    if let Some(path) = resource.kind().path_owned() {
+                    if let Some(path) = resource_manager.resource_path(&resource) {
                         if let Some(file_name) = path.file_name() {
                             let new_full_path = relative_path.join(file_name);
-                            Log::verify(block_on(resource_manager.move_resource(
-                                resource,
-                                new_full_path,
-                                "./",
-                                filter,
-                            )));
+                            Log::verify(block_on(
+                                resource_manager.move_resource(&resource, new_full_path),
+                            ));
 
                             self.refresh(ui, resource_manager, message_sender);
                         }
@@ -1330,17 +1331,15 @@ impl AssetBrowser {
                                     if let Ok(resource) =
                                         block_on(resource_manager.request_untyped(entry.path()))
                                     {
-                                        if let Some(path) = resource.kind().path_owned() {
+                                        if let Some(path) =
+                                            resource_manager.resource_path(&resource)
+                                        {
                                             if let Some(file_name) = path.file_name() {
                                                 let new_full_path =
                                                     target_sub_dir_normalized.join(file_name);
                                                 Log::verify(block_on(
-                                                    resource_manager.move_resource(
-                                                        resource,
-                                                        new_full_path,
-                                                        "./",
-                                                        filter,
-                                                    ),
+                                                    resource_manager
+                                                        .move_resource(&resource, new_full_path),
                                                 ));
                                             }
                                         }

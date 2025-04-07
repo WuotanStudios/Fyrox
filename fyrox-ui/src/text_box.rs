@@ -47,6 +47,7 @@ use crate::{
     BuildContext, Control, HorizontalAlignment, UiNode, UserInterface, VerticalAlignment,
 };
 use copypasta::ClipboardProvider;
+
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
 use std::{
     cell::RefCell,
@@ -414,6 +415,7 @@ pub type FilterCallback = dyn FnMut(char) -> bool + Send;
 /// You can change brush of caret by using [`TextBoxBuilder::with_caret_brush`] and also selection brush by using
 /// [`TextBoxBuilder::with_selection_brush`], it could be useful if you don't like default colors.
 #[derive(Default, Clone, Visit, Reflect, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct TextBox {
     /// Base widget of the text box.
     pub widget: Widget,
@@ -841,7 +843,7 @@ impl TextBox {
             .borrow()
             .get_lines()
             .get(position.line)
-            .map_or(false, |line| position.offset < line.len())
+            .is_some_and(|line| position.offset < line.len())
     }
 
     fn set_caret_position(&mut self, position: Position) {
@@ -1348,6 +1350,7 @@ impl Control for TextBox {
                                     true
                                 }
                             }
+                            self.selection_range.set_value_and_mark_modified(None);
                             if !text_equals(&text, new_text) {
                                 text.set_text(new_text);
                                 drop(text);

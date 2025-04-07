@@ -46,6 +46,7 @@ use crate::{
     utils::make_node_name,
     Message,
 };
+
 use std::{
     fmt::{Debug, Formatter},
     ops::{Deref, DerefMut},
@@ -72,6 +73,7 @@ pub enum DropAnchor {
 }
 
 #[derive(Visit, Reflect, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct SceneItem {
     #[component(include)]
     pub tree: Tree,

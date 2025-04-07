@@ -39,6 +39,7 @@ use crate::{
     widget::{Widget, WidgetBuilder},
     BuildContext, Control, HorizontalAlignment, UiNode, UserInterface, VerticalAlignment,
 };
+
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
 use std::{
     cell::RefCell,
@@ -326,6 +327,7 @@ impl TextMessage {
 /// Please keep in mind, that like any other situation when you "changing" something via messages, you should remember
 /// that the change is **not** immediate.
 #[derive(Default, Clone, Visit, Reflect, Debug, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct Text {
     /// Base widget of the Text widget.
     pub widget: Widget,
@@ -520,8 +522,8 @@ impl TextBuilder {
     }
 
     /// Sets the desired text of the widget.
-    pub fn with_text<P: AsRef<str>>(mut self, text: P) -> Self {
-        self.text = Some(text.as_ref().to_owned());
+    pub fn with_text<P: Into<String>>(mut self, text: P) -> Self {
+        self.text = Some(text.into());
         self
     }
 

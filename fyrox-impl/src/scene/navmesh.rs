@@ -155,6 +155,7 @@ impl Visit for Container {
 /// }
 /// ```
 #[derive(Debug, Clone, Visit, Reflect, Default, ComponentProvider)]
+#[reflect(derived_type = "Node")]
 pub struct NavigationalMesh {
     base: Base,
     #[reflect(read_only)]

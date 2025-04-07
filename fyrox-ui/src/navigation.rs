@@ -33,6 +33,7 @@ use crate::{
     widget::{Widget, WidgetBuilder, WidgetMessage},
     BuildContext, Control, UiNode, UserInterface,
 };
+
 use fyrox_graph::SceneGraph;
 use std::ops::{Deref, DerefMut};
 
@@ -79,6 +80,7 @@ use std::ops::{Deref, DerefMut};
 /// to cycle from one button to another. A focused button then can be "clicked" using Enter key.
 #[derive(Default, Clone, Visit, Reflect, Debug, TypeUuidProvider, ComponentProvider)]
 #[type_uuid(id = "135d347b-5019-4743-906c-6df5c295a3be")]
+#[reflect(derived_type = "UiNode")]
 pub struct NavigationLayer {
     /// Base widget of the navigation layer.
     pub widget: Widget,

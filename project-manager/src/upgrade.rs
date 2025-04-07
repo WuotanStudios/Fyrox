@@ -93,9 +93,10 @@ impl UpgradeTool {
 
         let is_local = dependency.path.is_some();
 
-        let is_git = dependency.source.as_ref().map_or(false, |s| {
-            s.contains("https://github.com/FyroxEngine/Fyrox")
-        });
+        let is_git = dependency
+            .source
+            .as_ref()
+            .is_some_and(|s| s.contains("https://github.com/FyroxEngine/Fyrox"));
         let selected_version = if is_local {
             Version::Local
         } else if is_git {
@@ -225,8 +226,9 @@ impl UpgradeTool {
             if message.destination() == self.version_type_selector {
                 match *index {
                     0 => {
-                        self.selected_version =
-                            Version::Specific(fyrox_template_core::CURRENT_VERSION.to_string());
+                        self.selected_version = Version::Specific(
+                            fyrox_template_core::CURRENT_ENGINE_VERSION.to_string(),
+                        );
                     }
                     1 => {
                         self.selected_version = Version::Local;

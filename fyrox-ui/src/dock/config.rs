@@ -50,11 +50,24 @@ impl Visit for SplitTilesDescriptor {
     }
 }
 
+#[derive(Debug, PartialEq, Clone, Default, Serialize, Deserialize, Visit)]
+pub struct MultiWindowDescriptor {
+    pub index: u32,
+    pub names: Vec<ImmutableString>,
+}
+
+impl MultiWindowDescriptor {
+    pub fn has_window(&self, name: &str) -> bool {
+        self.names.iter().map(|n| n.as_str()).any(|n| n == name)
+    }
+}
+
 #[derive(Debug, PartialEq, Clone, Visit, Default, Serialize, Deserialize)]
 pub enum TileContentDescriptor {
     #[default]
     Empty,
     Window(ImmutableString),
+    MultiWindow(MultiWindowDescriptor),
     SplitTiles(SplitTilesDescriptor),
 }
 
@@ -67,6 +80,19 @@ impl TileContentDescriptor {
                     .map(|w| w.name.clone())
                     .unwrap_or_default(),
             ),
+            TileContent::MultiWindow { index, windows } => {
+                Self::MultiWindow(MultiWindowDescriptor {
+                    index: *index,
+                    names: windows
+                        .iter()
+                        .map(|window| {
+                            ui.try_get(*window)
+                                .map(|w| w.name.clone())
+                                .unwrap_or_default()
+                        })
+                        .collect(),
+                })
+            }
             TileContent::VerticalTiles { splitter, tiles } => {
                 Self::SplitTiles(SplitTilesDescriptor {
                     splitter: *splitter,
@@ -95,6 +121,7 @@ impl TileContentDescriptor {
         match self {
             TileContentDescriptor::Empty => false,
             TileContentDescriptor::Window(window_name) => window_name.as_str() == window,
+            TileContentDescriptor::MultiWindow(windows) => windows.has_window(window),
             TileContentDescriptor::SplitTiles(tiles) => {
                 for tile in tiles.children.iter() {
                     if tile.content.has_window(window) {
@@ -105,6 +132,33 @@ impl TileContentDescriptor {
             }
         }
     }
+}
+
+fn find_window(
+    window_name: &ImmutableString,
+    ui: &mut UserInterface,
+    windows: &[Handle<UiNode>],
+) -> Handle<UiNode> {
+    if window_name.is_empty() {
+        Log::warn(
+            "Window name is empty, wrong widget will be used as a \
+        tile content. Assign a unique name to the window used in a docking \
+        manager!",
+        );
+    }
+
+    let window_handle = ui.find_handle(ui.root(), &mut |n| n.name == *window_name);
+
+    if window_handle.is_none() {
+        for other_window_handle in windows.iter().cloned() {
+            if let Some(window_node) = ui.try_get(other_window_handle) {
+                if &window_node.name == window_name {
+                    return other_window_handle;
+                }
+            }
+        }
+    }
+    window_handle
 }
 
 impl TileDescriptor {
@@ -133,27 +187,7 @@ impl TileDescriptor {
             .with_content(match &self.content {
                 TileContentDescriptor::Empty => TileContent::Empty,
                 TileContentDescriptor::Window(window_name) => {
-                    if window_name.is_empty() {
-                        Log::warn(
-                            "Window name is empty, wrong widget will be used as a \
-                        tile content. Assign a unique name to the window used in a docking \
-                        manager!",
-                        );
-                    }
-
-                    let mut window_handle =
-                        ui.find_handle(ui.root(), &mut |n| n.name == *window_name);
-
-                    if window_handle.is_none() {
-                        for other_window_handle in windows.iter().cloned() {
-                            if let Some(window_node) = ui.try_get(other_window_handle) {
-                                if &window_node.name == window_name {
-                                    window_handle = other_window_handle;
-                                }
-                            }
-                        }
-                    }
-
+                    let window_handle = find_window(window_name, ui, windows);
                     if window_handle.is_some() {
                         ui.send_message(WindowMessage::open(
                             window_handle,
@@ -165,6 +199,21 @@ impl TileDescriptor {
                         TileContent::Window(window_handle)
                     } else {
                         TileContent::Empty
+                    }
+                }
+                TileContentDescriptor::MultiWindow(MultiWindowDescriptor { index, names }) => {
+                    let handles = names
+                        .iter()
+                        .map(|n| find_window(n, ui, windows))
+                        .filter(|h| h.is_some())
+                        .collect::<Vec<_>>();
+                    match handles.len() {
+                        0 => TileContent::Empty,
+                        1 => TileContent::Window(handles[0]),
+                        _ => TileContent::MultiWindow {
+                            index: *index,
+                            windows: handles,
+                        },
                     }
                 }
                 TileContentDescriptor::SplitTiles(split_tiles) => match split_tiles.orientation {
@@ -193,6 +242,12 @@ pub struct FloatingWindowDescriptor {
     pub name: ImmutableString,
     pub position: Vector2<f32>,
     pub size: Vector2<f32>,
+    #[serde(default = "default_is_open")]
+    pub is_open: bool,
+}
+
+fn default_is_open() -> bool {
+    true
 }
 
 #[derive(Debug, PartialEq, Clone, Visit, Default, Serialize, Deserialize)]
@@ -205,6 +260,6 @@ impl DockingManagerLayoutDescriptor {
     pub fn has_window<S: AsRef<str>>(&self, window: S) -> bool {
         self.root_tile_descriptor
             .as_ref()
-            .map_or(false, |desc| desc.content.has_window(window.as_ref()))
+            .is_some_and(|desc| desc.content.has_window(window.as_ref()))
     }
 }

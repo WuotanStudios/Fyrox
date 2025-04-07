@@ -41,6 +41,7 @@ use crate::{
         node::{Node, NodeTrait},
     },
 };
+
 use fyrox_graph::constructor::ConstructorProvider;
 use fyrox_graph::BaseSceneGraph;
 use std::ops::{Deref, DerefMut};
@@ -107,6 +108,7 @@ use std::ops::{Deref, DerefMut};
 /// }
 /// ```
 #[derive(Debug, Visit, Default, Clone, Reflect, ComponentProvider)]
+#[reflect(derived_type = "Node")]
 pub struct Decal {
     base: Base,
 

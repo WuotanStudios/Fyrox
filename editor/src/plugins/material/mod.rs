@@ -25,7 +25,6 @@ use crate::plugins::inspector::{
 use crate::{
     asset::item::AssetItem,
     fyrox::{
-        asset::untyped::ResourceKind,
         core::{
             algebra::{Matrix2, Matrix3, Matrix4, Vector2, Vector3, Vector4},
             color::Color,
@@ -83,6 +82,7 @@ use crate::{
     },
     send_sync_message, Editor, Engine, Message,
 };
+use fyrox::gui::utils::make_simple_tooltip;
 use std::sync::Arc;
 
 pub mod editor;
@@ -284,8 +284,7 @@ impl MaterialEditor {
 
         let graph = &mut engine.scenes[preview.scene()].graph;
         let sphere = MeshBuilder::new(BaseBuilder::new())
-            .with_surfaces(vec![SurfaceBuilder::new(SurfaceResource::new_ok(
-                ResourceKind::Embedded,
+            .with_surfaces(vec![SurfaceBuilder::new(SurfaceResource::new_embedded(
                 SurfaceData::make_sphere(30, 30, 1.0, &Matrix4::identity()),
             ))
             .build()])
@@ -294,6 +293,11 @@ impl MaterialEditor {
 
         let ctx = &mut engine.user_interfaces.first_mut().build_ctx();
 
+        let shader_tooltip = make_simple_tooltip(
+            ctx,
+            "Drag and drop a shader from the asset browser \
+        to assign it here.",
+        );
         let panel;
         let properties_panel;
         let shader;
@@ -317,7 +321,9 @@ impl MaterialEditor {
                                     )
                                     .with_child({
                                         shader = ResourceFieldBuilder::<Shader>::new(
-                                            WidgetBuilder::new().on_column(1),
+                                            WidgetBuilder::new()
+                                                .on_column(1)
+                                                .with_tooltip(shader_tooltip),
                                             sender,
                                         )
                                         .build(ctx, engine.resource_manager.clone());
@@ -472,25 +478,25 @@ impl MaterialEditor {
             .map(|property| {
                 use ShaderPropertyKind as Kind;
                 let item = match &property.kind {
-                    Kind::Float(value) => value.make_view(ctx),
+                    Kind::Float { value } => value.make_view(ctx),
                     Kind::FloatArray { value, max_len } => make_array_view(ctx, value, *max_len),
-                    Kind::Int(value) => value.make_view(ctx),
+                    Kind::Int { value } => value.make_view(ctx),
                     Kind::IntArray { value, max_len } => make_array_view(ctx, value, *max_len),
-                    Kind::UInt(value) => value.make_view(ctx),
+                    Kind::UInt { value } => value.make_view(ctx),
                     Kind::UIntArray { value, max_len } => make_array_view(ctx, value, *max_len),
-                    Kind::Vector2(value) => value.make_view(ctx),
+                    Kind::Vector2 { value } => value.make_view(ctx),
                     Kind::Vector2Array { value, max_len } => make_array_view(ctx, value, *max_len),
-                    Kind::Vector3(value) => value.make_view(ctx),
+                    Kind::Vector3 { value } => value.make_view(ctx),
                     Kind::Vector3Array { value, max_len } => make_array_view(ctx, value, *max_len),
-                    Kind::Vector4(value) => value.make_view(ctx),
+                    Kind::Vector4 { value } => value.make_view(ctx),
                     Kind::Vector4Array { value, max_len } => make_array_view(ctx, value, *max_len),
-                    Kind::Matrix2(value) => value.make_view(ctx),
+                    Kind::Matrix2 { value } => value.make_view(ctx),
                     Kind::Matrix2Array { value, max_len } => make_array_view(ctx, value, *max_len),
-                    Kind::Matrix3(value) => value.make_view(ctx),
+                    Kind::Matrix3 { value } => value.make_view(ctx),
                     Kind::Matrix3Array { value, max_len } => make_array_view(ctx, value, *max_len),
-                    Kind::Matrix4(value) => value.make_view(ctx),
+                    Kind::Matrix4 { value } => value.make_view(ctx),
                     Kind::Matrix4Array { value, max_len } => make_array_view(ctx, value, *max_len),
-                    Kind::Bool(value) => value.make_view(ctx),
+                    Kind::Bool { value } => value.make_view(ctx),
                     Kind::Color { r, g, b, a } => ColorFieldBuilder::new(WidgetBuilder::new())
                         .with_color(Color::from_rgba(*r, *g, *b, *a))
                         .build(ctx),
@@ -546,7 +552,7 @@ impl MaterialEditor {
                     ImageMessage::texture(
                         view.editor,
                         MessageDirection::ToWidget,
-                        binding.value.clone().map(Into::into),
+                        binding.value.clone(),
                     ),
                 ),
                 MaterialResourceBinding::PropertyGroup(ref group) => {
@@ -614,6 +620,7 @@ impl MaterialEditor {
                     sender.do_command(SetMaterialShaderCommand::new(
                         material.clone(),
                         value.clone(),
+                        engine.resource_manager.resource_path(material.as_ref()),
                     ));
                 }
             }
@@ -625,17 +632,18 @@ impl MaterialEditor {
             if message.destination() == self.texture_context_menu.show_in_asset_browser
                 && self.texture_context_menu.target.is_some()
             {
-                let path = (*engine
+                let texture = (*engine
                     .user_interfaces
                     .first_mut()
                     .node(self.texture_context_menu.target)
                     .cast::<Image>()
                     .unwrap()
                     .texture)
-                    .clone()
-                    .and_then(|t| t.kind().into_path());
+                    .clone();
 
-                if let Some(path) = path {
+                if let Some(path) =
+                    texture.and_then(|t| engine.resource_manager.resource_path(t.as_ref()))
+                {
                     sender.send(Message::ShowInAssetBrowser(path));
                 }
             } else if message.destination() == self.texture_context_menu.unassign
@@ -651,6 +659,7 @@ impl MaterialEditor {
                         material.clone(),
                         binding_name.clone(),
                         MaterialResourceBinding::Texture(MaterialTextureBinding { value: None }),
+                        engine.resource_manager.resource_path(material.as_ref()),
                     ));
                 }
             }
@@ -673,7 +682,7 @@ impl MaterialEditor {
                                     ImageMessage::texture(
                                         message.destination(),
                                         MessageDirection::ToWidget,
-                                        texture.clone().map(Into::into),
+                                        texture.clone(),
                                     ),
                                 );
 
@@ -683,6 +692,7 @@ impl MaterialEditor {
                                     MaterialResourceBinding::Texture(MaterialTextureBinding {
                                         value: texture,
                                     }),
+                                    engine.resource_manager.resource_path(material.as_ref()),
                                 ));
                             }
                         }
@@ -702,6 +712,7 @@ impl MaterialEditor {
                                         resource_view.name.clone(),
                                         property_name.clone(),
                                         property_value,
+                                        engine.resource_manager.resource_path(material.as_ref()),
                                     ),
                                 );
                             }
@@ -755,6 +766,7 @@ impl EditorPlugin for MaterialPlugin {
         let container = &editor.plugins.get_mut::<InspectorPlugin>().property_editors;
         container.insert(MaterialPropertyEditorDefinition {
             sender: Mutex::new(editor.message_sender.clone()),
+            resource_manager: editor.engine.resource_manager.clone(),
         });
         container.insert(InheritablePropertyEditorDefinition::<MaterialResource>::new());
     }

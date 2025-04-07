@@ -45,6 +45,7 @@ use crate::{
     BuildContext, Control, HorizontalAlignment, Thickness, UiNode, UserInterface,
     VerticalAlignment,
 };
+
 use fyrox_core::variable::InheritableVariable;
 use fyrox_graph::constructor::{ConstructorProvider, GraphNodeConstructor};
 use fyrox_graph::BaseSceneGraph;
@@ -262,6 +263,7 @@ pub enum DragContext<T: NumericType> {
 /// }
 /// ```
 #[derive(Default, Clone, Visit, Reflect, Debug, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct NumericUpDown<T: NumericType> {
     /// Base widget of the [`NumericUpDown`] widget.
     pub widget: Widget,

@@ -71,6 +71,7 @@ use std::ops::{Deref, DerefMut};
 /// ```
 #[derive(Default, Clone, Visit, Reflect, Debug, TypeUuidProvider, ComponentProvider)]
 #[type_uuid(id = "6b843a36-53da-467b-b85e-2380fe891ca1")]
+#[reflect(derived_type = "UiNode")]
 pub struct Canvas {
     /// Base widget of the canvas.
     pub widget: Widget,

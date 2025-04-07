@@ -59,6 +59,8 @@ use crate::{
     scene::{commands::ChangeSelectionCommand, Selection},
     send_sync_message,
 };
+
+use fyrox::core::reflect::Reflect;
 use fyrox::gui::style::resource::StyleResourceExt;
 use fyrox::gui::style::Style;
 use std::cmp::Ordering;
@@ -76,7 +78,7 @@ pub struct StateViewer {
     prev_layer: Option<usize>,
 }
 
-fn create_socket<N: 'static>(
+fn create_socket<N: Reflect>(
     direction: SocketDirection,
     index: usize,
     show_index: bool,
@@ -91,7 +93,7 @@ fn create_socket<N: 'static>(
         .build(&mut ui.build_ctx())
 }
 
-fn create_sockets<N: 'static>(
+fn create_sockets<N: Reflect>(
     count: usize,
     direction: SocketDirection,
     parent_node: Handle<PoseNode<Handle<N>>>,
@@ -102,7 +104,7 @@ fn create_sockets<N: 'static>(
         .collect::<Vec<_>>()
 }
 
-fn fetch_pose_node_model_handle<N: 'static>(
+fn fetch_pose_node_model_handle<N: Reflect>(
     handle: Handle<UiNode>,
     ui: &UserInterface,
 ) -> Handle<PoseNode<Handle<N>>> {
@@ -112,7 +114,7 @@ fn fetch_pose_node_model_handle<N: 'static>(
         .model_handle
 }
 
-fn fetch_socket_pose_node_model_handle<N: 'static>(
+fn fetch_socket_pose_node_model_handle<N: Reflect>(
     handle: Handle<UiNode>,
     ui: &UserInterface,
 ) -> Handle<PoseNode<Handle<N>>> {
@@ -446,7 +448,7 @@ impl StateViewer {
                             if machine_layer
                                 .nodes()
                                 .try_borrow(pose_node.model_handle)
-                                .map_or(false, |node| node.parent_state == self.state.into())
+                                .is_some_and(|node| node.parent_state == self.state.into())
                             {
                                 true
                             } else {

@@ -33,6 +33,7 @@ use crate::{
             image::ImageBuilder,
             key::HotKey,
             message::{KeyCode, UiMessage},
+            style::{resource::StyleResourceExt, Style},
             utils::make_simple_tooltip,
             widget::WidgetBuilder,
             BuildContext, Thickness, UiNode,
@@ -45,9 +46,7 @@ use crate::{
     settings::Settings,
     Engine, Message,
 };
-use fyrox::gui::style::resource::StyleResourceExt;
-use fyrox::gui::style::Style;
-use std::any::Any;
+use fyrox::core::define_as_any_trait;
 
 pub mod gizmo;
 pub mod move_mode;
@@ -58,32 +57,9 @@ pub mod scale_mode;
 pub mod select_mode;
 pub mod terrain;
 
-pub trait BaseInteractionMode: 'static {
-    fn as_any(&self) -> &dyn Any;
+define_as_any_trait!(InteractionModeAsAny => InteractionMode);
 
-    fn as_any_mut(&mut self) -> &mut dyn Any;
-
-    fn into_any(self: Box<Self>) -> Box<dyn Any>;
-}
-
-impl<T> BaseInteractionMode for T
-where
-    T: 'static,
-{
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-
-    fn into_any(self: Box<Self>) -> Box<dyn Any> {
-        self
-    }
-}
-
-pub trait InteractionMode: BaseInteractionMode {
+pub trait InteractionMode: InteractionModeAsAny {
     fn on_left_mouse_button_down(
         &mut self,
         editor_selection: &Selection,
@@ -114,6 +90,33 @@ pub trait InteractionMode: BaseInteractionMode {
         frame_size: Vector2<f32>,
         settings: &Settings,
     );
+
+    /// Called when the mouse enters the scene viewer while this interaction mode is active.
+    #[allow(unused_variables)]
+    fn on_mouse_enter(
+        &mut self,
+        editor_selection: &Selection,
+        controller: &mut dyn SceneController,
+        engine: &mut Engine,
+        frame_size: Vector2<f32>,
+        settings: &Settings,
+    ) {
+    }
+
+    /// Called when the mouse leaves the scene viewer while this interaction mode is active.
+    /// - `mouse_position`: The position of the mouse relative to the scene viewer, with (0,0) being the left-top corner.
+    /// - `editor_selection`: The currently selected object in the editor.
+    #[allow(unused_variables)]
+    fn on_mouse_leave(
+        &mut self,
+        mouse_position: Vector2<f32>,
+        editor_selection: &Selection,
+        controller: &mut dyn SceneController,
+        engine: &mut Engine,
+        frame_size: Vector2<f32>,
+        settings: &Settings,
+    ) {
+    }
 
     fn update(
         &mut self,

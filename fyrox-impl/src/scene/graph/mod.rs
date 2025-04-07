@@ -42,7 +42,7 @@
 //! just by linking nodes to each other. Good example of this is skeleton which
 //! is used in skinning (animating 3d model by set of bones).
 
-use crate::scene::base::NodeMessageKind;
+use crate::scene::node::NodeAsAny;
 use crate::{
     asset::untyped::UntypedResource,
     core::{
@@ -58,7 +58,7 @@ use crate::{
     material::{MaterialResourceBinding, MaterialTextureBinding},
     resource::model::{Model, ModelResource, ModelResourceExtension},
     scene::{
-        base::{NodeMessage, NodeScriptMessage, SceneNodeId},
+        base::{NodeMessage, NodeMessageKind, NodeScriptMessage, SceneNodeId},
         camera::Camera,
         dim2::{self},
         graph::{
@@ -77,7 +77,9 @@ use crate::{
 };
 use bitflags::bitflags;
 use fxhash::{FxHashMap, FxHashSet};
+use fyrox_core::pool::BorrowAs;
 use fyrox_graph::SceneGraphNode;
+use std::ops::{Deref, DerefMut};
 use std::{
     any::{Any, TypeId},
     fmt::Debug,
@@ -124,6 +126,20 @@ impl GraphPerformanceStatistics {
 
 /// A helper type alias for node pool.
 pub type NodePool = Pool<Node, NodeContainer>;
+
+impl<T: NodeTrait> BorrowAs<Node, NodeContainer> for Handle<T> {
+    type Target = T;
+
+    fn borrow_as_ref(self, pool: &NodePool) -> Option<&T> {
+        pool.try_borrow(self.transmute())
+            .and_then(|n| NodeAsAny::as_any(n.0.deref()).downcast_ref::<T>())
+    }
+
+    fn borrow_as_mut(self, pool: &mut NodePool) -> Option<&mut T> {
+        pool.try_borrow_mut(self.transmute())
+            .and_then(|n| NodeAsAny::as_any_mut(n.0.deref_mut()).downcast_mut::<T>())
+    }
+}
 
 /// See module docs.
 #[derive(Debug, Reflect)]
@@ -369,6 +385,71 @@ impl Graph {
         references
     }
 
+    /// Sets global position of a scene node. Internally, this method converts the given position
+    /// to the local space of the parent node of the given scene node and sets it as local position
+    /// of the node. In other words, this method does not modify global position itself, but calculates
+    /// new local position of the given node so that its global position will be as requested.
+    ///
+    /// ## Important
+    ///
+    /// This method relies on pre-calculated global transformation of the hierarchy. This may give
+    /// unexpected results if you've modified transforms of ancestors in the hierarchy of the node
+    /// and then called this method. This happens because global transform calculation is deferred
+    /// to the end of the frame. If you want to ensure that everything works as expected, call
+    /// [`Self::update_hierarchical_data`] before calling this method. It is not called automatically,
+    /// because it is quite heavy, and in most cases this method works ok without it.
+    pub fn set_global_position(&mut self, node_handle: Handle<Node>, position: Vector3<f32>) {
+        let (node, parent) = self
+            .pool
+            .try_borrow_dependant_mut(node_handle, |node| node.parent());
+        if let Some(node) = node {
+            if let Some(parent) = parent {
+                let relative_position = parent
+                    .global_transform()
+                    .try_inverse()
+                    .unwrap_or_default()
+                    .transform_point(&position.into())
+                    .coords;
+                node.local_transform_mut().set_position(relative_position);
+            } else {
+                node.local_transform_mut().set_position(position);
+            }
+            self.update_hierarchical_data_for_descendants(node_handle);
+        }
+    }
+
+    /// Sets global rotation of a scene node. Internally, this method converts the given rotation
+    /// to the local space of the parent node of the given scene node and sets it as local rotation
+    /// of the node. In other words, this method does not modify global rotation itself, but calculates
+    /// new local rotation of the given node so that its global rotation will be as requested.
+    ///
+    /// ## Important
+    ///
+    /// This method relies on pre-calculated global transformation of the hierarchy. This may give
+    /// unexpected results if you've modified transforms of ancestors in the hierarchy of the node
+    /// and then called this method. This happens because global transform calculation is deferred
+    /// to the end of the frame. If you want to ensure that everything works as expected, call
+    /// [`Self::update_hierarchical_data`] before calling this method. It is not called automatically,
+    /// because it is quite heavy, and in most cases this method works ok without it.
+    pub fn set_global_rotation(&mut self, node: Handle<Node>, rotation: UnitQuaternion<f32>) {
+        let (node, parent) = self
+            .pool
+            .try_borrow_dependant_mut(node, |node| node.parent());
+        if let Some(node) = node {
+            if let Some(parent) = parent {
+                let basis = parent
+                    .global_transform()
+                    .try_inverse()
+                    .unwrap_or_default()
+                    .basis();
+                let relative_rotation = UnitQuaternion::from_matrix(&basis) * rotation;
+                node.local_transform_mut().set_rotation(relative_rotation);
+            } else {
+                node.local_transform_mut().set_rotation(rotation);
+            }
+        }
+    }
+
     /// Tries to borrow mutable references to two nodes at the same time by given handles. Will
     /// panic if handles overlaps (points to same node).
     #[inline]
@@ -450,23 +531,24 @@ impl Graph {
     /// Links specified child with specified parent while keeping the
     /// child's global position and rotation.
     #[inline]
-    pub fn link_nodes_keep_global_position_rotation(
-        &mut self,
-        child: Handle<Node>,
-        parent: Handle<Node>,
-    ) {
-        let parent_transform_inv = self.pool[parent]
+    pub fn link_nodes_keep_global_transform(&mut self, child: Handle<Node>, parent: Handle<Node>) {
+        let parent_global_transform_inv = self.pool[parent]
             .global_transform()
             .try_inverse()
             .unwrap_or_default();
-        let child_transform = self.pool[child].global_transform();
-        let relative_transform = parent_transform_inv * child_transform;
+        let child_global_transform = self.pool[child].global_transform();
+        let relative_transform = parent_global_transform_inv * child_global_transform;
         let local_position = relative_transform.position();
-        let local_rotation = UnitQuaternion::from_matrix(&relative_transform.basis());
+        let parent_inv_global_rotation = self.global_rotation(parent).inverse();
+        let local_rotation = parent_inv_global_rotation * self.global_rotation(child);
+        let local_scale = self
+            .global_scale(child)
+            .component_div(&self.global_scale(parent));
         self.pool[child]
             .local_transform_mut()
             .set_position(local_position)
-            .set_rotation(local_rotation);
+            .set_rotation(local_rotation)
+            .set_scale(local_scale);
         self.link_nodes(child, parent);
     }
 
@@ -831,7 +913,7 @@ impl Graph {
 
         let parent_enabled = nodes
             .try_borrow(node.parent())
-            .map_or(true, |p| p.is_globally_enabled());
+            .is_none_or(|p| p.is_globally_enabled());
         node.global_enabled.set(parent_enabled && node.is_enabled());
 
         for &child in node.children() {
@@ -846,7 +928,7 @@ impl Graph {
 
         let parent_visibility = nodes
             .try_borrow(node.parent())
-            .map_or(true, |p| p.global_visibility());
+            .is_none_or(|p| p.global_visibility());
         node.global_visibility
             .set(parent_visibility && node.visibility());
 
@@ -1411,13 +1493,7 @@ impl Graph {
     /// Returns global scale matrix of a node.
     #[inline]
     pub fn global_scale_matrix(&self, node: Handle<Node>) -> Matrix4<f32> {
-        let node = &self[node];
-        let local_scale_matrix = Matrix4::new_nonuniform_scaling(node.local_transform().scale());
-        if node.parent().is_some() {
-            self.global_scale_matrix(node.parent()) * local_scale_matrix
-        } else {
-            local_scale_matrix
-        }
+        Matrix4::new_nonuniform_scaling(&self.global_scale(node))
     }
 
     /// Returns rotation quaternion of a node in world coordinates.
@@ -1465,9 +1541,13 @@ impl Graph {
 
     /// Returns global scale of a node.
     #[inline]
-    pub fn global_scale(&self, node: Handle<Node>) -> Vector3<f32> {
-        let m = self.global_scale_matrix(node);
-        Vector3::new(m[0], m[5], m[10])
+    pub fn global_scale(&self, mut node: Handle<Node>) -> Vector3<f32> {
+        let mut global_scale = Vector3::repeat(1.0);
+        while let Some(node_ref) = self.try_get(node) {
+            global_scale = global_scale.component_mul(node_ref.local_transform().scale());
+            node = node_ref.parent;
+        }
+        global_scale
     }
 
     /// Tries to borrow a node using the given handle and searches the script buffer for a script
@@ -1558,65 +1638,21 @@ impl Graph {
     }
 }
 
-impl Index<Handle<Node>> for Graph {
-    type Output = Node;
-
-    #[inline]
-    fn index(&self, index: Handle<Node>) -> &Self::Output {
-        &self.pool[index]
-    }
-}
-
-impl IndexMut<Handle<Node>> for Graph {
-    #[inline]
-    fn index_mut(&mut self, index: Handle<Node>) -> &mut Self::Output {
-        &mut self.pool[index]
-    }
-}
-
-impl<T> Index<Handle<T>> for Graph
-where
-    T: NodeTrait,
-{
+impl<T, B: BorrowAs<Node, NodeContainer, Target = T>> Index<B> for Graph {
     type Output = T;
 
     #[inline]
-    fn index(&self, typed_handle: Handle<T>) -> &Self::Output {
-        let node = &self.pool[typed_handle.transmute()];
-        node.cast().unwrap_or_else(|| {
-            panic!(
-                "Downcasting of node {} ({}:{}) to type {} failed!",
-                node.name(),
-                typed_handle.index(),
-                typed_handle.generation(),
-                node.type_name()
-            )
-        })
+    fn index(&self, typed_handle: B) -> &Self::Output {
+        self.typed_ref(typed_handle)
+            .expect("The node handle is invalid or the object it points to has different type.")
     }
 }
 
-impl<T> IndexMut<Handle<T>> for Graph
-where
-    T: NodeTrait,
-{
+impl<T, B: BorrowAs<Node, NodeContainer, Target = T>> IndexMut<B> for Graph {
     #[inline]
-    fn index_mut(&mut self, typed_handle: Handle<T>) -> &mut Self::Output {
-        let node = &mut self.pool[typed_handle.transmute()];
-
-        // SAFETY: This is safe to do, because we only read node's values for panicking.
-        let second_node_ref = unsafe { &*(node as *const Node) };
-
-        if let Some(downcasted) = node.cast_mut() {
-            downcasted
-        } else {
-            panic!(
-                "Downcasting of node {} ({}:{}) to type {} failed!",
-                second_node_ref.name(),
-                typed_handle.index(),
-                typed_handle.generation(),
-                second_node_ref.type_name()
-            )
-        }
+    fn index_mut(&mut self, typed_handle: B) -> &mut Self::Output {
+        self.typed_mut(typed_handle)
+            .expect("The node handle is invalid or the object it points to has different type.")
     }
 }
 
@@ -1659,7 +1695,15 @@ impl AbstractSceneGraph for Graph {
 
 impl BaseSceneGraph for Graph {
     type Prefab = Model;
+    type NodeContainer = NodeContainer;
     type Node = Node;
+
+    #[inline]
+    fn actual_type_id(&self, handle: Handle<Self::Node>) -> Option<TypeId> {
+        self.pool
+            .try_borrow(handle)
+            .map(|n| NodeAsAny::as_any(n.0.deref()).type_id())
+    }
 
     #[inline]
     fn root(&self) -> Handle<Self::Node> {
@@ -1781,6 +1825,18 @@ impl BaseSceneGraph for Graph {
     fn try_get_mut(&mut self, handle: Handle<Self::Node>) -> Option<&mut Self::Node> {
         self.pool.try_borrow_mut(handle)
     }
+
+    fn derived_type_ids(&self, handle: Handle<Self::Node>) -> Option<Vec<TypeId>> {
+        self.pool
+            .try_borrow(handle)
+            .map(|n| Box::deref(&n.0).query_derived_types().to_vec())
+    }
+
+    fn actual_type_name(&self, handle: Handle<Self::Node>) -> Option<&'static str> {
+        self.pool
+            .try_borrow(handle)
+            .map(|n| n.0.deref().type_name())
+    }
 }
 
 impl SceneGraph for Graph {
@@ -1798,10 +1854,25 @@ impl SceneGraph for Graph {
     fn linear_iter_mut(&mut self) -> impl Iterator<Item = &mut Self::Node> {
         self.pool.iter_mut()
     }
+
+    fn typed_ref<Ref>(
+        &self,
+        handle: impl BorrowAs<Self::Node, Self::NodeContainer, Target = Ref>,
+    ) -> Option<&Ref> {
+        self.pool.typed_ref(handle)
+    }
+
+    fn typed_mut<Ref>(
+        &mut self,
+        handle: impl BorrowAs<Self::Node, Self::NodeContainer, Target = Ref>,
+    ) -> Option<&mut Ref> {
+        self.pool.typed_mut(handle)
+    }
 }
 
 #[cfg(test)]
 mod test {
+    use crate::scene::rigidbody::{RigidBody, RigidBodyBuilder};
     use crate::{
         asset::{io::FsResourceIo, manager::ResourceManager},
         core::{
@@ -1830,6 +1901,7 @@ mod test {
         script::ScriptTrait,
     };
     use fyrox_core::algebra::Vector2;
+    use fyrox_core::append_extension;
     use fyrox_resource::untyped::ResourceKind;
     use std::{fs, path::Path, sync::Arc};
 
@@ -2023,6 +2095,7 @@ mod test {
                 ),
             )
             .with_surfaces(vec![SurfaceBuilder::new(SurfaceResource::new_ok(
+                Uuid::new_v4(),
                 ResourceKind::Embedded,
                 SurfaceData::make_cone(16, 1.0, 1.0, &Matrix4::identity()),
             ))
@@ -2038,6 +2111,9 @@ mod test {
         let mut visitor = Visitor::new();
         scene.save("Scene", &mut visitor).unwrap();
         visitor.save_binary(path).unwrap();
+        visitor
+            .save_text_to_file(append_extension(path, "txt"))
+            .unwrap();
     }
 
     fn make_resource_manager() -> ResourceManager {
@@ -2046,6 +2122,7 @@ mod test {
             &resource_manager,
             Arc::new(SerializationContext::new()),
         );
+        resource_manager.update_and_load_registry("test_output/resources.registry");
         resource_manager
     }
 
@@ -2146,6 +2223,50 @@ mod test {
     }
 
     #[test]
+    fn test_global_scale() {
+        let mut graph = Graph::new();
+
+        let b;
+        let c;
+        let a = PivotBuilder::new(
+            BaseBuilder::new()
+                .with_local_transform(
+                    TransformBuilder::new()
+                        .with_local_scale(Vector3::new(1.0, 1.0, 2.0))
+                        .build(),
+                )
+                .with_children(&[{
+                    b = PivotBuilder::new(
+                        BaseBuilder::new()
+                            .with_local_transform(
+                                TransformBuilder::new()
+                                    .with_local_scale(Vector3::new(3.0, 2.0, 1.0))
+                                    .build(),
+                            )
+                            .with_children(&[{
+                                c = PivotBuilder::new(
+                                    BaseBuilder::new().with_local_transform(
+                                        TransformBuilder::new()
+                                            .with_local_scale(Vector3::new(1.0, 2.0, 3.0))
+                                            .build(),
+                                    ),
+                                )
+                                .build(&mut graph);
+                                c
+                            }]),
+                    )
+                    .build(&mut graph);
+                    b
+                }]),
+        )
+        .build(&mut graph);
+
+        assert_eq!(graph.global_scale(a), Vector3::new(1.0, 1.0, 2.0));
+        assert_eq!(graph.global_scale(b), Vector3::new(3.0, 2.0, 2.0));
+        assert_eq!(graph.global_scale(c), Vector3::new(3.0, 4.0, 6.0));
+    }
+
+    #[test]
     fn test_hierarchy_changes_propagation() {
         let mut graph = Graph::new();
 
@@ -2236,9 +2357,33 @@ mod test {
         assert!(graph[c].global_visibility());
         assert!(graph[d].global_visibility());
 
-        assert!(!graph[a].is_globally_enabled());
+        assert!(!graph.pool.typed_ref(a).unwrap().is_globally_enabled());
         assert!(!graph[b].is_globally_enabled());
         assert!(!graph[c].is_globally_enabled());
         assert!(!graph[d].is_globally_enabled());
+    }
+
+    #[test]
+    fn test_typed_borrow() {
+        let mut graph = Graph::new();
+        let pivot = PivotBuilder::new(BaseBuilder::new()).build(&mut graph);
+        let rigid_body = RigidBodyBuilder::new(BaseBuilder::new()).build(&mut graph);
+
+        assert!(graph.pool.typed_ref(pivot).is_some());
+        assert!(graph.pool.typed_ref(pivot.transmute::<Pivot>()).is_some());
+        assert!(graph
+            .pool
+            .typed_ref(pivot.transmute::<RigidBody>())
+            .is_none());
+
+        assert!(graph.pool.typed_ref(rigid_body).is_some());
+        assert!(graph
+            .pool
+            .typed_ref(rigid_body.transmute::<RigidBody>())
+            .is_some());
+        assert!(graph
+            .pool
+            .typed_ref(rigid_body.transmute::<Pivot>())
+            .is_none());
     }
 }

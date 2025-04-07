@@ -41,7 +41,7 @@ use crate::{
         SVector, Scalar, UnitComplex, UnitQuaternion, Vector2, Vector3, Vector4, U1,
     },
     array_as_u8_slice_mut,
-    io::{self, FileLoadError},
+    io::{self, FileError},
     pool::{Handle, Pool},
     replace_slashes,
 };
@@ -646,7 +646,7 @@ pub enum VisitError {
     /// A poison error occurred while trying to visit a mutex.
     PoisonedMutex,
     /// A FileLoadError was encountered while trying to decode Visitor data from a file.
-    FileLoadError(FileLoadError),
+    FileLoadError(FileError),
 }
 
 impl Error for VisitError {}
@@ -711,8 +711,8 @@ impl From<String> for VisitError {
     }
 }
 
-impl From<FileLoadError> for VisitError {
-    fn from(e: FileLoadError) -> Self {
+impl From<FileError> for VisitError {
+    fn from(e: FileError) -> Self {
         Self::FileLoadError(e)
     }
 }
@@ -1498,6 +1498,13 @@ impl Visitor {
         self.save_binary_to_memory(writer)
     }
 
+    pub fn save_text_to_file<P: AsRef<Path>>(&self, path: P) -> VisitResult {
+        let mut writer = BufWriter::new(File::create(path)?);
+        let text = self.save_text();
+        writer.write_all(text.as_bytes())?;
+        Ok(())
+    }
+
     fn load_node_binary(&mut self, file: &mut dyn Read) -> Result<Handle<VisitorNode>, VisitError> {
         let name_len = file.read_u32::<LittleEndian>()? as usize;
         let mut raw_name = vec![Default::default(); name_len];
@@ -1637,7 +1644,7 @@ impl Visit for String {
     fn visit(&mut self, name: &str, visitor: &mut Visitor) -> VisitResult {
         let mut region = visitor.enter_region(name)?;
 
-        let mut len = self.as_bytes().len() as u32;
+        let mut len = self.len() as u32;
         len.visit("Length", &mut region)?;
 
         let mut data = if region.reading {

@@ -18,6 +18,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+use crate::renderer::DynamicSurfaceCache;
 use crate::{
     core::{
         algebra::{Matrix4, Point3, Vector2, Vector3},
@@ -35,8 +36,8 @@ use crate::{
         },
         framework::{
             error::FrameworkError,
-            framebuffer::{Attachment, AttachmentKind, FrameBuffer},
-            gpu_texture::{GpuTexture, PixelKind},
+            framebuffer::{Attachment, AttachmentKind},
+            gpu_texture::PixelKind,
             server::GraphicsServer,
         },
         FallbackResources, RenderPassStatistics, ShadowMapPrecision, DIRECTIONAL_SHADOW_PASS_NAME,
@@ -47,10 +48,11 @@ use crate::{
         light::directional::{FrustumSplitOptions, CSM_NUM_CASCADES},
     },
 };
-use std::{cell::RefCell, rc::Rc};
+use fyrox_graphics::framebuffer::GpuFrameBuffer;
+use fyrox_graphics::gpu_texture::GpuTexture;
 
 pub struct Cascade {
-    pub frame_buffer: Box<dyn FrameBuffer>,
+    pub frame_buffer: GpuFrameBuffer,
     pub view_proj_matrix: Matrix4<f32>,
     pub z_far: f32,
 }
@@ -83,12 +85,8 @@ impl Cascade {
         })
     }
 
-    pub fn texture(&self) -> Rc<RefCell<dyn GpuTexture>> {
-        self.frame_buffer
-            .depth_attachment()
-            .unwrap()
-            .texture
-            .clone()
+    pub fn texture(&self) -> &GpuTexture {
+        &self.frame_buffer.depth_attachment().unwrap().texture
     }
 }
 
@@ -99,6 +97,7 @@ pub struct CsmRenderer {
 }
 
 pub(crate) struct CsmRenderContext<'a, 'c> {
+    pub elapsed_time: f32,
     pub frame_size: Vector2<f32>,
     pub state: &'a dyn GraphicsServer,
     pub graph: &'c Graph,
@@ -109,6 +108,7 @@ pub(crate) struct CsmRenderContext<'a, 'c> {
     pub texture_cache: &'a mut TextureCache,
     pub fallback_resources: &'a FallbackResources,
     pub uniform_memory_allocator: &'a mut UniformMemoryAllocator,
+    pub dynamic_surface_cache: &'a mut DynamicSurfaceCache,
 }
 
 impl CsmRenderer {
@@ -147,6 +147,7 @@ impl CsmRenderer {
         let mut stats = RenderPassStatistics::default();
 
         let CsmRenderContext {
+            elapsed_time,
             frame_size,
             state,
             graph,
@@ -157,6 +158,7 @@ impl CsmRenderer {
             texture_cache,
             fallback_resources,
             uniform_memory_allocator,
+            dynamic_surface_cache,
         } = ctx;
 
         let LightSourceKind::Directional { ref csm_options } = light.kind else {
@@ -245,11 +247,12 @@ impl CsmRenderer {
             self.cascades[i].z_far = z_far;
 
             let viewport = Rect::new(0, 0, self.size as i32, self.size as i32);
-            let framebuffer = &mut *self.cascades[i].frame_buffer;
+            let framebuffer = &self.cascades[i].frame_buffer;
             framebuffer.clear(viewport, None, Some(1.0), None);
 
             let bundle_storage = RenderDataBundleStorage::from_graph(
                 graph,
+                elapsed_time,
                 ObserverInfo {
                     observer_position,
                     z_near,
@@ -261,6 +264,7 @@ impl CsmRenderer {
                 RenderDataBundleStorageOptions {
                     collect_lights: false,
                 },
+                dynamic_surface_cache,
             );
 
             stats += bundle_storage.render_to_frame_buffer(

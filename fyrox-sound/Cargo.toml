@@ -1,6 +1,6 @@
 [package]
 name = "fyrox-sound"
-version = "0.36.0"
+version = "0.36.2"
 authors = ["Dmitry Stepanov <d1maxa@yandex.ru>"]
 edition = "2021"
 license = "MIT"
@@ -12,16 +12,15 @@ homepage = "https://fyrox.rs"
 documentation = "https://docs.rs/fyrox-sound"
 repository = "https://github.com/FyroxEngine/Fyrox"
 readme = "README.md"
-rust-version = "1.80"
+rust-version = "1.86"
 
 [dependencies]
-fyrox-core = { path = "../fyrox-core", version = "0.36.0" }
-fyrox-resource = { path = "../fyrox-resource", version = "0.36.0" }
-lewton = "0.10.2"
-ogg = "0.8.0"
+fyrox-core = { path = "../fyrox-core", version = "0.36.2" }
+fyrox-resource = { path = "../fyrox-resource", version = "0.36.2" }
 hrtf = "0.8.0"
 hound = "3.4.0"
 strum = "0.26.1"
 strum_macros = "0.26.1"
 tinyaudio = "1"
 serde = { version = "1", features = ["derive"] }
+symphonia = { version = "0.5.4", features = ["all-codecs"] }

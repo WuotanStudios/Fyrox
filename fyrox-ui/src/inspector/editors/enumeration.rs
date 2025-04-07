@@ -47,6 +47,7 @@ use crate::{
     BuildContext, Control, HorizontalAlignment, Thickness, UiNode, UserInterface,
     VerticalAlignment,
 };
+
 use fyrox_core::ComponentProvider;
 use fyrox_graph::BaseSceneGraph;
 use std::{
@@ -76,6 +77,7 @@ impl EnumPropertyEditorMessage {
 }
 
 #[derive(Visit, Reflect, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct EnumPropertyEditor<T: InspectableEnum> {
     pub widget: Widget,
     pub variant_selector: Handle<UiNode>,
@@ -552,13 +554,13 @@ where
                 EnumPropertyEditorMessage::PropertyChanged(property_changed) => {
                     Some(PropertyChanged {
                         name: ctx.name.to_string(),
-                        owner_type_id: ctx.owner_type_id,
+
                         value: FieldKind::Inspectable(Box::new(property_changed.clone())),
                     })
                 }
                 EnumPropertyEditorMessage::Variant(index) => Some(PropertyChanged {
                     name: ctx.name.to_string(),
-                    owner_type_id: ctx.owner_type_id,
+
                     value: FieldKind::object((self.variant_generator)(*index)),
                 }),
             };

@@ -25,15 +25,13 @@ use crate::{
     renderer::{
         bundle::{BundleRenderContext, RenderDataBundleStorage},
         cache::{shader::ShaderCache, texture::TextureCache, uniform::UniformMemoryAllocator},
-        framework::{
-            error::FrameworkError, framebuffer::FrameBuffer, gpu_texture::GpuTexture,
-            server::GraphicsServer,
-        },
+        framework::{error::FrameworkError, server::GraphicsServer},
         FallbackResources, GeometryCache, QualitySettings, RenderPassStatistics,
     },
     scene::mesh::RenderPath,
 };
-use std::{cell::RefCell, rc::Rc};
+use fyrox_graphics::framebuffer::GpuFrameBuffer;
+use fyrox_graphics::gpu_texture::GpuTexture;
 
 pub(crate) struct ForwardRenderer {
     render_pass_name: ImmutableString,
@@ -45,11 +43,11 @@ pub(crate) struct ForwardRenderContext<'a> {
     pub texture_cache: &'a mut TextureCache,
     pub shader_cache: &'a mut ShaderCache,
     pub bundle_storage: &'a RenderDataBundleStorage,
-    pub framebuffer: &'a mut dyn FrameBuffer,
+    pub framebuffer: &'a GpuFrameBuffer,
     pub viewport: Rect<i32>,
     pub quality_settings: &'a QualitySettings,
     pub fallback_resources: &'a FallbackResources,
-    pub scene_depth: Rc<RefCell<dyn GpuTexture>>,
+    pub scene_depth: &'a GpuTexture,
     pub ambient_light: Color,
     pub uniform_memory_allocator: &'a mut UniformMemoryAllocator,
 }
@@ -98,7 +96,7 @@ impl ForwardRenderer {
                 light_position: &Default::default(),
                 fallback_resources,
                 ambient_light,
-                scene_depth: Some(&scene_depth),
+                scene_depth: Some(scene_depth),
             },
         )?;
 

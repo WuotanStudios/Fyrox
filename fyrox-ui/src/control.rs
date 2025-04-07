@@ -20,28 +20,26 @@
 
 use crate::{
     core::{algebra::Vector2, pool::Handle, reflect::Reflect, uuid::Uuid, visitor::Visit},
+    core::{ComponentProvider, TypeUuidProvider},
     draw::DrawingContext,
     message::{OsEvent, UiMessage},
     widget::Widget,
     UiNode, UserInterface,
 };
-use fyrox_core::{ComponentProvider, TypeUuidProvider};
+use fyrox_core::define_as_any_trait;
+
 use std::{
     any::Any,
     ops::{Deref, DerefMut},
     sync::mpsc::Sender,
 };
 
+define_as_any_trait!(ControlAsAny => BaseControl);
+
 /// Base trait for all UI widgets. It has auto-impl and you don't need to implement it manually. Your widget
 /// must implement [`Clone`] and [`Control`] traits for impl to be generated for you, also your widget must
 /// not contain any references (due to `'static` lifetime requirement).
-pub trait BaseControl: Send + 'static {
-    /// Returns `self` as `&dyn Any`.
-    fn as_any(&self) -> &dyn Any;
-
-    /// Returns `self` as `&mut dyn Any`.
-    fn as_any_mut(&mut self) -> &mut dyn Any;
-
+pub trait BaseControl: Send + ControlAsAny {
     /// Returns the exact copy of the widget in "type-erased" form.
     fn clone_boxed(&self) -> Box<dyn Control>;
 
@@ -59,14 +57,6 @@ impl<T> BaseControl for T
 where
     T: Any + Clone + 'static + Control + TypeUuidProvider,
 {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-
     fn clone_boxed(&self) -> Box<dyn Control> {
         Box::new(self.clone())
     }
@@ -102,7 +92,7 @@ pub trait Control:
     /// # use fyrox_ui::{
     /// #     core::algebra::Vector2, define_widget_deref, message::UiMessage, Control, UserInterface,
     /// #     core::{visitor::prelude::*, reflect::prelude::*, type_traits::prelude::*,},
-    /// #     widget::Widget,
+    /// #     widget::Widget, UiNode
     /// # };
     /// # use std::{
     /// #     any::{Any, TypeId},
@@ -112,6 +102,7 @@ pub trait Control:
     /// # use fyrox_graph::BaseSceneGraph;
     /// #
     /// #[derive(Clone, Visit, Reflect, Debug, ComponentProvider)]
+    /// #[reflect(derived_type = "UiNode")]
     /// struct MyWidget {
     ///     widget: Widget,
     /// }
@@ -173,7 +164,7 @@ pub trait Control:
     /// #     core::{visitor::prelude::*, reflect::prelude::*, type_traits::prelude::*,},
     /// #     define_widget_deref,
     /// #     message::UiMessage,
-    /// #     Control, UserInterface, widget::Widget,
+    /// #     Control, UserInterface, widget::Widget, UiNode
     /// # };
     /// # use std::{
     /// #     any::{Any, TypeId},
@@ -182,6 +173,7 @@ pub trait Control:
     /// # use fyrox_core::uuid_provider;
     /// #
     /// #[derive(Clone, Visit, Reflect, Debug, ComponentProvider)]
+    /// #[reflect(derived_type = "UiNode")]
     /// struct MyWidget {
     ///     widget: Widget,
     /// }
@@ -230,7 +222,7 @@ pub trait Control:
     /// #     draw::{CommandTexture, Draw, DrawingContext},
     /// #     core::{visitor::prelude::*, reflect::prelude::*, type_traits::prelude::*,},
     /// #     message::UiMessage,
-    /// #     Control, UserInterface, widget::Widget,
+    /// #     Control, UserInterface, widget::Widget, UiNode
     /// # };
     /// # use std::{
     /// #     any::{Any, TypeId},
@@ -239,6 +231,7 @@ pub trait Control:
     /// # use fyrox_core::uuid_provider;
     /// #
     /// #[derive(Clone, Visit, Reflect, Debug, ComponentProvider)]
+    /// #[reflect(derived_type = "UiNode")]
     /// struct MyWidget {
     ///     widget: Widget,
     /// }

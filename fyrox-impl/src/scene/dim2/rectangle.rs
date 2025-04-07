@@ -50,6 +50,7 @@ use crate::{
 };
 use bytemuck::{Pod, Zeroable};
 use fyrox_core::value_as_u8_slice;
+
 use fyrox_graph::constructor::ConstructorProvider;
 use fyrox_graph::BaseSceneGraph;
 use std::{
@@ -165,6 +166,7 @@ impl Hash for RectangleVertex {
 /// which means `[0; 0]` corresponds to top-left corner of the texture and `[1; 1]` corresponds to
 /// right-bottom corner.
 #[derive(Reflect, Debug, Clone, ComponentProvider)]
+#[reflect(derived_type = "Node")]
 pub struct Rectangle {
     base: Base,
 
@@ -208,6 +210,7 @@ impl Default for Rectangle {
             color: Default::default(),
             uv_rect: InheritableVariable::new_modified(Rect::new(0.0, 0.0, 1.0, 1.0)),
             material: InheritableVariable::new_modified(MaterialResource::new_ok(
+                Uuid::new_v4(),
                 Default::default(),
                 Material::standard_2d(),
             )),
@@ -351,6 +354,7 @@ impl NodeTrait for Rectangle {
         let sort_index = ctx.calculate_sorting_index(self.global_position());
 
         ctx.storage.push_triangles(
+            ctx.dynamic_surface_cache,
             Vertex::layout(),
             &self.material,
             RenderPath::Forward,
@@ -389,7 +393,11 @@ impl RectangleBuilder {
             base_builder,
             color: Color::WHITE,
             uv_rect: Rect::new(0.0, 0.0, 1.0, 1.0),
-            material: MaterialResource::new_ok(Default::default(), Material::standard_2d()),
+            material: MaterialResource::new_ok(
+                Uuid::new_v4(),
+                Default::default(),
+                Material::standard_2d(),
+            ),
         }
     }
 

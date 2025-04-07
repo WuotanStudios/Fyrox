@@ -55,6 +55,7 @@ use crate::{
     utils::window_content,
     Editor, Message, WidgetMessage, WrapMode, MSG_SYNC_FLAG,
 };
+use fyrox::gui::stack_panel::StackPanelBuilder;
 use fyrox::gui::style::resource::StyleResourceExt;
 use fyrox::gui::style::Style;
 use fyrox::gui::utils::make_image_button_with_tooltip;
@@ -79,14 +80,26 @@ pub struct EditorEnvironment {
 }
 
 impl EditorEnvironment {
-    pub fn try_get_from(environment: &Option<Arc<dyn InspectorEnvironment>>) -> Option<&Self> {
+    pub fn try_get_from(
+        environment: &Option<Arc<dyn InspectorEnvironment>>,
+    ) -> Result<&Self, InspectorError> {
+        let environment = &**environment.as_ref().ok_or(InspectorError::Custom(
+            "Missing InspectorEnvironment".into(),
+        ))?;
         environment
-            .as_ref()
-            .and_then(|e| e.as_any().downcast_ref::<Self>())
+            .as_any()
+            .downcast_ref::<Self>()
+            .ok_or(InspectorError::Custom(format!(
+                "Expected InspectorEnvironment to be EditorEnvironment, found: {}",
+                environment.name(),
+            )))
     }
 }
 
 impl InspectorEnvironment for EditorEnvironment {
+    fn name(&self) -> String {
+        format!("EditorEnvironment:{:?}", self.type_id())
+    }
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -97,6 +110,7 @@ pub struct InspectorPlugin {
     pub property_editors: Arc<PropertyEditorDefinitionContainer>,
     pub(crate) window: Handle<UiNode>,
     pub inspector: Handle<UiNode>,
+    pub head: Handle<UiNode>,
     warning_text: Handle<UiNode>,
     type_name_text: Handle<UiNode>,
     docs_button: Handle<UiNode>,
@@ -159,19 +173,29 @@ fn is_out_of_sync(sync_errors: &[InspectorError]) -> bool {
 }
 
 impl InspectorPlugin {
-    pub fn new(ctx: &mut BuildContext, sender: MessageSender) -> Self {
-        let property_editors = Arc::new(make_property_editors_container(sender));
+    pub fn new(
+        ctx: &mut BuildContext,
+        sender: MessageSender,
+        resource_manager: ResourceManager,
+    ) -> Self {
+        let property_editors = Arc::new(make_property_editors_container(sender, resource_manager));
 
         let warning_text_str =
             "Multiple objects are selected, showing properties of the first object only!\
             Only common properties will be editable!";
 
+        let head = StackPanelBuilder::new(WidgetBuilder::new()).build(ctx);
+        let inspector = InspectorBuilder::new(WidgetBuilder::new()).build(ctx);
+        let content =
+            StackPanelBuilder::new(WidgetBuilder::new().with_child(head).with_child(inspector))
+                .build(ctx);
+
         let warning_text;
         let type_name_text;
-        let inspector;
         let docs_button;
         let window = WindowBuilder::new(WidgetBuilder::new().with_name("Inspector"))
             .with_title(WindowTitle::text("Inspector"))
+            .with_tab_label("Inspector")
             .with_content(
                 GridBuilder::new(
                     WidgetBuilder::new()
@@ -223,11 +247,7 @@ impl InspectorPlugin {
                         )
                         .with_child(
                             ScrollViewerBuilder::new(WidgetBuilder::new().on_row(2))
-                                .with_content({
-                                    inspector =
-                                        InspectorBuilder::new(WidgetBuilder::new()).build(ctx);
-                                    inspector
-                                })
+                                .with_content(content)
                                 .build(ctx),
                         ),
                 )
@@ -242,6 +262,7 @@ impl InspectorPlugin {
         Self {
             window,
             inspector,
+            head,
             property_editors,
             warning_text,
             type_name_text,

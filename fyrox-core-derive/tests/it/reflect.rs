@@ -23,7 +23,6 @@
 #![allow(clippy::disallowed_names)] // Useless in tests
 
 use std::{
-    any::TypeId,
     collections::HashMap,
     ops::{Deref, DerefMut},
 };
@@ -71,7 +70,7 @@ fn doc_comments() {
         field: 0,
         hidden: 0,
     };
-    s.fields_info(&mut |infos| {
+    s.fields_ref(&mut |infos| {
         assert_eq!(
             infos[0].doc,
             " This is a \
@@ -288,14 +287,20 @@ fn reflect_fields_list_of_struct() {
         field_b: "Foobar".to_string(),
     };
 
-    foo.fields(&mut |fields| assert_eq!(fields.len(), 2));
-    foo.fields(&mut |fields| {
-        fields[0].downcast_ref::<f32>(&mut |result| assert_eq!(result.cloned(), Some(1.23)))
+    foo.fields_ref(&mut |fields| assert_eq!(fields.len(), 2));
+    foo.fields_ref(&mut |fields| {
+        fields[0]
+            .value
+            .field_value_as_reflect()
+            .downcast_ref::<f32>(&mut |result| assert_eq!(result.cloned(), Some(1.23)))
     });
-    foo.fields(&mut |fields| {
-        fields[1].downcast_ref::<String>(&mut |result| {
-            assert_eq!(result.cloned(), Some("Foobar".to_string()))
-        })
+    foo.fields_ref(&mut |fields| {
+        fields[1]
+            .value
+            .field_value_as_reflect()
+            .downcast_ref::<String>(&mut |result| {
+                assert_eq!(result.cloned(), Some("Foobar".to_string()))
+            })
     });
 }
 
@@ -309,9 +314,12 @@ fn reflect_fields_list_of_enum() {
 
     let bar_variant = Foo::Bar { field_a: 1.23 };
 
-    bar_variant.fields(&mut |fields| assert_eq!(fields.len(), 1));
-    bar_variant.fields(&mut |fields| {
-        fields[0].downcast_ref::<f32>(&mut |result| assert_eq!(result.cloned(), Some(1.23)))
+    bar_variant.fields_ref(&mut |fields| assert_eq!(fields.len(), 1));
+    bar_variant.fields_ref(&mut |fields| {
+        fields[0]
+            .value
+            .field_value_as_reflect()
+            .downcast_ref::<f32>(&mut |result| assert_eq!(result.cloned(), Some(1.23)))
     });
 
     let baz_variant = Foo::Baz {
@@ -319,23 +327,26 @@ fn reflect_fields_list_of_enum() {
         field_c: "Foobar".to_string(),
     };
 
-    baz_variant.fields(&mut |fields| assert_eq!(fields.len(), 2));
-    baz_variant.fields(&mut |fields| {
-        fields[0].downcast_ref::<u32>(&mut |result| assert_eq!(result.cloned(), Some(321)))
+    baz_variant.fields_ref(&mut |fields| assert_eq!(fields.len(), 2));
+    baz_variant.fields_ref(&mut |fields| {
+        fields[0]
+            .value
+            .field_value_as_reflect()
+            .downcast_ref::<u32>(&mut |result| assert_eq!(result.cloned(), Some(321)))
     });
-    baz_variant.fields(&mut |fields| {
-        fields[1].downcast_ref::<String>(&mut |result| {
-            assert_eq!(result.cloned(), Some("Foobar".to_string()))
-        })
+    baz_variant.fields_ref(&mut |fields| {
+        fields[1]
+            .value
+            .field_value_as_reflect()
+            .downcast_ref::<String>(&mut |result| {
+                assert_eq!(result.cloned(), Some("Foobar".to_string()))
+            })
     });
 }
 
-fn default_prop() -> FieldInfo<'static, 'static> {
-    FieldInfo {
-        owner_type_id: TypeId::of::<()>(),
+fn default_prop_metadata() -> FieldMetadata<'static> {
+    FieldMetadata {
         name: "",
-        value: &(),
-        reflect_value: &(),
         display_name: "",
         read_only: false,
         immutable_collection: false,
@@ -344,7 +355,7 @@ fn default_prop() -> FieldInfo<'static, 'static> {
         step: None,
         precision: None,
         description: "",
-        type_name: "",
+        tag: "",
         doc: "",
     }
 }
@@ -359,24 +370,30 @@ fn inspect_default() {
 
     let data = Data::default();
 
+    let the_field_metadata = FieldMetadata {
+        name: "the_field",
+        display_name: "The Field",
+        ..default_prop_metadata()
+    };
+
+    let another_field_metadata = FieldMetadata {
+        name: "another_field",
+        display_name: "Another Field",
+        ..default_prop_metadata()
+    };
+
     let expected = vec![
-        FieldInfo {
-            owner_type_id: TypeId::of::<Data>(),
-            name: "the_field",
-            display_name: "The Field",
+        FieldRef {
+            metadata: &the_field_metadata,
             value: &data.the_field,
-            ..default_prop()
         },
-        FieldInfo {
-            owner_type_id: TypeId::of::<Data>(),
-            name: "another_field",
-            display_name: "Another Field",
+        FieldRef {
+            metadata: &another_field_metadata,
             value: &data.another_field,
-            ..default_prop()
         },
     ];
 
-    data.fields_info(&mut |fields_info| assert_eq!(fields_info, expected));
+    data.fields_ref(&mut |fields_ref| assert_eq!(fields_ref, expected));
 }
 
 #[test]
@@ -400,41 +417,44 @@ fn inspect_attributes() {
             max_value = 1.1,
             step = 0.1,
             precision = 3,
-            description = "This is a property description."
+            description = "This is a property description.",
+            tag = "SomeTag"
         )]
         y: f32,
     }
 
     let data = Data::default();
 
+    let x_metadata = FieldMetadata {
+        name: "x",
+        display_name: "Super X",
+        ..default_prop_metadata()
+    };
+
     let expected = vec![
-        FieldInfo {
-            owner_type_id: TypeId::of::<Data>(),
-            name: "x",
-            display_name: "Super X",
+        FieldRef {
+            metadata: &x_metadata,
             value: &data.x,
-            type_name: std::any::type_name::<f32>(),
-            ..default_prop()
         },
-        FieldInfo {
-            owner_type_id: TypeId::of::<Data>(),
-            name: "y",
-            display_name: "Y",
+        FieldRef {
+            metadata: &FieldMetadata {
+                name: "y",
+                display_name: "Y",
+                read_only: true,
+                immutable_collection: false,
+                min_value: Some(0.1),
+                max_value: Some(1.1),
+                step: Some(0.1),
+                precision: Some(3),
+                description: "This is a property description.",
+                tag: "SomeTag",
+                doc: "",
+            },
             value: &data.y,
-            reflect_value: &data.y,
-            read_only: true,
-            immutable_collection: false,
-            min_value: Some(0.1),
-            max_value: Some(1.1),
-            step: Some(0.1),
-            precision: Some(3),
-            description: "This is a property description.",
-            type_name: std::any::type_name::<f32>(),
-            doc: "",
         },
     ];
 
-    data.fields_info(&mut |fields_info| assert_eq!(fields_info[0..2], expected));
+    data.fields_ref(&mut |fields_ref| assert_eq!(fields_ref[0..2], expected));
 }
 
 #[test]
@@ -444,25 +464,25 @@ fn inspect_struct() {
 
     let x = Tuple::default();
 
-    x.fields_info(&mut |fields_info| {
+    x.fields_ref(&mut |fields_ref| {
         assert_eq!(
-            fields_info,
+            fields_ref,
             vec![
-                FieldInfo {
-                    owner_type_id: TypeId::of::<Tuple>(),
-                    name: "0",
-                    display_name: "0",
+                FieldRef {
+                    metadata: &FieldMetadata {
+                        name: "0",
+                        display_name: "0",
+                        ..default_prop_metadata()
+                    },
                     value: &x.0,
-                    type_name: std::any::type_name::<f32>(),
-                    ..default_prop()
                 },
-                FieldInfo {
-                    owner_type_id: TypeId::of::<Tuple>(),
-                    name: "1",
-                    display_name: "1",
+                FieldRef {
+                    metadata: &FieldMetadata {
+                        name: "1",
+                        display_name: "1",
+                        ..default_prop_metadata()
+                    },
                     value: &x.1,
-                    type_name: std::any::type_name::<f32>(),
-                    ..default_prop()
                 },
             ]
         )
@@ -472,7 +492,7 @@ fn inspect_struct() {
     struct Unit;
 
     let x = Unit;
-    x.fields_info(&mut |fields_info| assert_eq!(fields_info, vec![]));
+    x.fields_ref(&mut |fields_ref| assert_eq!(fields_ref, vec![]));
 }
 
 #[test]
@@ -495,42 +515,42 @@ fn inspect_enum() {
         z: NonCopy { inner: 10 },
     };
 
-    data.fields_info(&mut |fields_info| {
+    data.fields_ref(&mut |fields_ref| {
         assert_eq!(
-            fields_info,
+            fields_ref,
             vec![
-                FieldInfo {
-                    owner_type_id: TypeId::of::<Data>(),
-                    name: "Named@x",
-                    display_name: "X",
+                FieldRef {
+                    metadata: &FieldMetadata {
+                        name: "Named@x",
+                        display_name: "X",
+                        ..default_prop_metadata()
+                    },
                     value: match data {
                         Data::Named { ref x, .. } => x,
                         _ => unreachable!(),
                     },
-                    type_name: std::any::type_name::<u32>(),
-                    ..default_prop()
                 },
-                FieldInfo {
-                    owner_type_id: TypeId::of::<Data>(),
-                    name: "Named@y",
-                    display_name: "Y",
-                    type_name: std::any::type_name::<u32>(),
+                FieldRef {
+                    metadata: &FieldMetadata {
+                        name: "Named@y",
+                        display_name: "Y",
+                        ..default_prop_metadata()
+                    },
                     value: match data {
                         Data::Named { ref y, .. } => y,
                         _ => unreachable!(),
                     },
-                    ..default_prop()
                 },
-                FieldInfo {
-                    owner_type_id: TypeId::of::<Data>(),
-                    name: "Named@z",
-                    display_name: "Z",
-                    type_name: std::any::type_name::<NonCopy>(),
+                FieldRef {
+                    metadata: &FieldMetadata {
+                        name: "Named@z",
+                        display_name: "Z",
+                        ..default_prop_metadata()
+                    },
                     value: match data {
                         Data::Named { ref z, .. } => z,
                         _ => unreachable!(),
                     },
-                    ..default_prop()
                 },
             ]
         )
@@ -538,31 +558,31 @@ fn inspect_enum() {
 
     let data = Data::Tuple(10.0, 20.0);
 
-    data.fields_info(&mut |fields_info| {
+    data.fields_ref(&mut |fields_ref| {
         assert_eq!(
-            fields_info,
+            fields_ref,
             vec![
-                FieldInfo {
-                    owner_type_id: TypeId::of::<Data>(),
-                    name: "Tuple@0",
-                    display_name: "0",
-                    type_name: std::any::type_name::<f32>(),
+                FieldRef {
+                    metadata: &FieldMetadata {
+                        name: "Tuple@0",
+                        display_name: "0",
+                        ..default_prop_metadata()
+                    },
                     value: match data {
                         Data::Tuple(ref f0, ref _f1) => f0,
                         _ => unreachable!(),
                     },
-                    ..default_prop()
                 },
-                FieldInfo {
-                    owner_type_id: TypeId::of::<Data>(),
-                    name: "Tuple@1",
-                    display_name: "1",
-                    type_name: std::any::type_name::<f32>(),
+                FieldRef {
+                    metadata: &FieldMetadata {
+                        name: "Tuple@1",
+                        display_name: "1",
+                        ..default_prop_metadata()
+                    },
                     value: match data {
                         Data::Tuple(ref _f0, ref f1) => f1,
                         _ => unreachable!(),
                     },
-                    ..default_prop()
                 },
             ]
         )
@@ -570,7 +590,7 @@ fn inspect_enum() {
 
     // unit variants don't have fields
     let data = Data::Unit;
-    data.fields_info(&mut |fields_info| assert_eq!(fields_info, vec![]));
+    data.fields_ref(&mut |fields_ref| assert_eq!(fields_ref, vec![]));
 }
 
 #[test]
@@ -602,12 +622,12 @@ fn inspect_prop_key_constants() {
     }
 
     assert_eq!(E::TUPLE_F_0, "Tuple@0");
-    E::Tuple(0).fields_info(&mut |fields_info| assert_eq!(E::TUPLE_F_0, fields_info[0].name));
+    E::Tuple(0).fields_ref(&mut |fields_ref| assert_eq!(E::TUPLE_F_0, fields_ref[0].name));
 
     assert_eq!(E::STRUCT_FIELD, "Struct@field");
 
     E::Struct { field: 0 }
-        .fields_info(&mut |fields_info| assert_eq!(E::STRUCT_FIELD, fields_info[0].name));
+        .fields_ref(&mut |fields_ref| assert_eq!(E::STRUCT_FIELD, fields_ref[0].name));
 }
 
 #[test]

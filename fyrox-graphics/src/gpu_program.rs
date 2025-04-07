@@ -26,25 +26,24 @@ use crate::{
         type_traits::prelude::*,
         visitor::prelude::*,
     },
-    error::FrameworkError,
+    define_shared_wrapper,
 };
+use fyrox_core::define_as_any_trait;
 use serde::{Deserialize, Serialize};
-use std::{any::Any, marker::PhantomData};
 use strum_macros::{AsRefStr, EnumString, VariantNames};
 
-pub trait GpuProgram: Any {
-    fn as_any(&self) -> &dyn Any;
-    fn as_any_mut(&mut self) -> &mut dyn Any;
-    fn uniform_location(&self, name: &ImmutableString) -> Result<UniformLocation, FrameworkError>;
-    fn uniform_block_index(&self, name: &ImmutableString) -> Result<usize, FrameworkError>;
+define_as_any_trait!(GpuProgramAsAny => GpuProgramTrait);
+pub trait GpuProgramTrait: GpuProgramAsAny {}
+define_shared_wrapper!(GpuProgram<dyn GpuProgramTrait>);
+
+pub enum ShaderKind {
+    Vertex,
+    Fragment,
 }
 
-#[derive(Clone, Debug)]
-pub struct UniformLocation {
-    pub id: glow::UniformLocation,
-    // Force compiler to not implement Send and Sync, because OpenGL is not thread-safe.
-    pub thread_mark: PhantomData<*const u8>,
-}
+define_as_any_trait!(GpuShaderAsAny => GpuShaderTrait);
+pub trait GpuShaderTrait: GpuShaderAsAny {}
+define_shared_wrapper!(GpuShader<dyn GpuShaderTrait>);
 
 /// A fallback value for the sampler.
 ///
@@ -104,7 +103,7 @@ pub enum SamplerKind {
 }
 
 /// Shader property with default value.
-#[derive(Serialize, Deserialize, Debug, PartialEq, Reflect, Visit)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Reflect, Visit, Clone)]
 pub enum ShaderResourceKind {
     /// A texture.
     Texture {
@@ -129,10 +128,13 @@ pub enum ShaderResourceKind {
     PropertyGroup(Vec<ShaderProperty>),
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Reflect, Visit)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Reflect, Visit)]
 pub enum ShaderPropertyKind {
     /// Real number.
-    Float(f32),
+    Float {
+        #[serde(default)]
+        value: f32,
+    },
 
     /// Real number array.
     FloatArray {
@@ -142,7 +144,10 @@ pub enum ShaderPropertyKind {
     },
 
     /// Integer number.
-    Int(i32),
+    Int {
+        #[serde(default)]
+        value: i32,
+    },
 
     /// Integer number array.
     IntArray {
@@ -152,7 +157,10 @@ pub enum ShaderPropertyKind {
     },
 
     /// Natural number.
-    UInt(u32),
+    UInt {
+        #[serde(default)]
+        value: u32,
+    },
 
     /// Natural number array.
     UIntArray {
@@ -162,10 +170,16 @@ pub enum ShaderPropertyKind {
     },
 
     /// Boolean value.
-    Bool(bool),
+    Bool {
+        #[serde(default)]
+        value: bool,
+    },
 
     /// Two-dimensional vector.
-    Vector2(Vector2<f32>),
+    Vector2 {
+        #[serde(default)]
+        value: Vector2<f32>,
+    },
 
     /// Two-dimensional vector array.
     Vector2Array {
@@ -175,7 +189,10 @@ pub enum ShaderPropertyKind {
     },
 
     /// Three-dimensional vector.
-    Vector3(Vector3<f32>),
+    Vector3 {
+        #[serde(default)]
+        value: Vector3<f32>,
+    },
 
     /// Three-dimensional vector array.
     Vector3Array {
@@ -185,7 +202,10 @@ pub enum ShaderPropertyKind {
     },
 
     /// Four-dimensional vector.
-    Vector4(Vector4<f32>),
+    Vector4 {
+        #[serde(default)]
+        value: Vector4<f32>,
+    },
 
     /// Four-dimensional vector array.
     Vector4Array {
@@ -195,7 +215,10 @@ pub enum ShaderPropertyKind {
     },
 
     /// 2x2 Matrix.
-    Matrix2(Matrix2<f32>),
+    Matrix2 {
+        #[serde(default)]
+        value: Matrix2<f32>,
+    },
 
     /// 2x2 Matrix array.
     Matrix2Array {
@@ -205,7 +228,10 @@ pub enum ShaderPropertyKind {
     },
 
     /// 3x3 Matrix.
-    Matrix3(Matrix3<f32>),
+    Matrix3 {
+        #[serde(default)]
+        value: Matrix3<f32>,
+    },
 
     /// 3x3 Matrix array.
     Matrix3Array {
@@ -215,7 +241,10 @@ pub enum ShaderPropertyKind {
     },
 
     /// 4x4 Matrix.
-    Matrix4(Matrix4<f32>),
+    Matrix4 {
+        #[serde(default)]
+        value: Matrix4<f32>,
+    },
 
     /// 4x4 Matrix array.
     Matrix4Array {
@@ -225,29 +254,30 @@ pub enum ShaderPropertyKind {
     },
 
     /// An sRGB color.
-    ///
-    /// # Conversion
-    ///
-    /// The colors you see on your monitor are in sRGB color space, this is fine for simple cases
-    /// of rendering, but not for complex things like lighting. Such things require color to be
-    /// linear. Value of this variant will be automatically **converted to linear color space**
-    /// before it passed to shader.
     Color {
         /// Default Red.
+        #[serde(default = "default_color_component")]
         r: u8,
 
         /// Default Green.
+        #[serde(default = "default_color_component")]
         g: u8,
 
         /// Default Blue.
+        #[serde(default = "default_color_component")]
         b: u8,
 
         /// Default Alpha.
+        #[serde(default = "default_color_component")]
         a: u8,
     },
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Reflect, Visit, Default)]
+fn default_color_component() -> u8 {
+    255
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Reflect, Visit, Clone, Default)]
 pub struct ShaderProperty {
     pub name: ImmutableString,
     pub kind: ShaderPropertyKind,
@@ -264,7 +294,7 @@ impl ShaderProperty {
 
 impl Default for ShaderPropertyKind {
     fn default() -> Self {
-        Self::Float(0.0)
+        Self::Float { value: 0.0 }
     }
 }
 
@@ -275,7 +305,7 @@ impl Default for ShaderResourceKind {
 }
 
 /// Shader resource definition.
-#[derive(Default, Serialize, Deserialize, Debug, PartialEq, Reflect, Visit)]
+#[derive(Default, Serialize, Deserialize, Clone, Debug, PartialEq, Reflect, Visit)]
 pub struct ShaderResourceDefinition {
     /// A name of the resource.
     pub name: ImmutableString,

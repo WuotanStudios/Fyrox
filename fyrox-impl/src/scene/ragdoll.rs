@@ -71,6 +71,14 @@ impl Reflect for Limb {
         file!()
     }
 
+    fn derived_types() -> &'static [TypeId] {
+        &[]
+    }
+
+    fn query_derived_types(&self) -> &'static [TypeId] {
+        Self::derived_types()
+    }
+
     fn type_name(&self) -> &'static str {
         type_name::<Self>()
     }
@@ -87,55 +95,126 @@ impl Reflect for Limb {
         env!("CARGO_PKG_NAME")
     }
 
-    fn fields_info(&self, func: &mut dyn FnMut(&[FieldInfo])) {
+    fn fields_ref(&self, func: &mut dyn FnMut(&[FieldRef])) {
         func(&[
-            FieldInfo {
-                owner_type_id: TypeId::of::<Self>(),
-                name: "Bone",
-                display_name: "Bone",
-                description: "",
-                type_name: type_name::<Handle<Node>>(),
-                value: &self.bone,
-                reflect_value: &self.bone,
-                read_only: false,
-                immutable_collection: false,
-                min_value: None,
-                max_value: None,
-                step: None,
-                precision: None,
-                doc: "",
+            {
+                static METADATA: FieldMetadata = FieldMetadata {
+                    name: "Bone",
+                    display_name: "Bone",
+                    description: "",
+                    tag: "",
+                    read_only: false,
+                    immutable_collection: false,
+                    min_value: None,
+                    max_value: None,
+                    step: None,
+                    precision: None,
+                    doc: "",
+                };
+                FieldRef {
+                    metadata: &METADATA,
+                    value: &self.bone,
+                }
             },
-            FieldInfo {
-                owner_type_id: TypeId::of::<Self>(),
-                name: "PhysicalBone",
-                display_name: "Physical Bone",
-                description: "",
-                type_name: type_name::<Handle<Node>>(),
-                value: &self.physical_bone,
-                reflect_value: &self.physical_bone,
-                read_only: false,
-                immutable_collection: false,
-                min_value: None,
-                max_value: None,
-                step: None,
-                precision: None,
-                doc: "",
+            {
+                static METADATA: FieldMetadata = FieldMetadata {
+                    name: "PhysicalBone",
+                    display_name: "Physical Bone",
+                    description: "",
+                    tag: "",
+                    read_only: false,
+                    immutable_collection: false,
+                    min_value: None,
+                    max_value: None,
+                    step: None,
+                    precision: None,
+                    doc: "",
+                };
+                FieldRef {
+                    metadata: &METADATA,
+                    value: &self.physical_bone,
+                }
             },
-            FieldInfo {
-                owner_type_id: TypeId::of::<Self>(),
-                name: "Children",
-                display_name: "Children",
-                description: "",
-                type_name: type_name::<Vec<Limb>>(),
-                value: &self.children,
-                reflect_value: &self.children,
-                read_only: false,
-                immutable_collection: false,
-                min_value: None,
-                max_value: None,
-                step: None,
-                precision: None,
-                doc: "",
+            {
+                static METADATA: FieldMetadata = FieldMetadata {
+                    name: "Children",
+                    display_name: "Children",
+                    description: "",
+                    tag: "",
+                    read_only: false,
+                    immutable_collection: false,
+                    min_value: None,
+                    max_value: None,
+                    step: None,
+                    precision: None,
+                    doc: "",
+                };
+                FieldRef {
+                    metadata: &METADATA,
+                    value: &self.children,
+                }
+            },
+        ])
+    }
+
+    fn fields_mut(&mut self, func: &mut dyn FnMut(&mut [FieldMut])) {
+        func(&mut [
+            {
+                static METADATA: FieldMetadata = FieldMetadata {
+                    name: "Bone",
+                    display_name: "Bone",
+                    description: "",
+                    tag: "",
+                    read_only: false,
+                    immutable_collection: false,
+                    min_value: None,
+                    max_value: None,
+                    step: None,
+                    precision: None,
+                    doc: "",
+                };
+                FieldMut {
+                    metadata: &METADATA,
+                    value: &mut self.bone,
+                }
+            },
+            {
+                static METADATA: FieldMetadata = FieldMetadata {
+                    name: "PhysicalBone",
+                    display_name: "Physical Bone",
+                    description: "",
+                    tag: "",
+                    read_only: false,
+                    immutable_collection: false,
+                    min_value: None,
+                    max_value: None,
+                    step: None,
+                    precision: None,
+                    doc: "",
+                };
+                FieldMut {
+                    metadata: &METADATA,
+                    value: &mut self.physical_bone,
+                }
+            },
+            {
+                static METADATA: FieldMetadata = FieldMetadata {
+                    name: "Children",
+                    display_name: "Children",
+                    description: "",
+                    tag: "",
+                    read_only: false,
+                    immutable_collection: false,
+                    min_value: None,
+                    max_value: None,
+                    step: None,
+                    precision: None,
+                    doc: "",
+                };
+                FieldMut {
+                    metadata: &METADATA,
+                    value: &mut self.children,
+                }
             },
         ])
     }
@@ -163,32 +242,6 @@ impl Reflect for Limb {
     fn set(&mut self, value: Box<dyn Reflect>) -> Result<Box<dyn Reflect>, Box<dyn Reflect>> {
         let this = std::mem::replace(self, value.take()?);
         Ok(Box::new(this))
-    }
-
-    fn fields(&self, func: &mut dyn FnMut(&[&dyn Reflect])) {
-        func(&[&self.bone, &self.physical_bone, &self.children])
-    }
-
-    fn fields_mut(&mut self, func: &mut dyn FnMut(&mut [&mut dyn Reflect])) {
-        func(&mut [&mut self.bone, &mut self.physical_bone, &mut self.children])
-    }
-
-    fn field(&self, name: &str, func: &mut dyn FnMut(Option<&dyn Reflect>)) {
-        func(match name {
-            "Bone" => Some(&self.bone),
-            "PhysicalBone" => Some(&self.physical_bone),
-            "Children" => Some(&self.children),
-            _ => None,
-        })
-    }
-
-    fn field_mut(&mut self, name: &str, func: &mut dyn FnMut(Option<&mut dyn Reflect>)) {
-        func(match name {
-            "Bone" => Some(&mut self.bone),
-            "PhysicalBone" => Some(&mut self.physical_bone),
-            "Children" => Some(&mut self.children),
-            _ => None,
-        })
     }
 }
 
@@ -230,6 +283,7 @@ impl Limb {
 /// you're brave enough you can read this code <https://github.com/FyroxEngine/Fyrox/blob/master/editor/src/utils/ragdoll.rs> -
 /// it creates a ragdoll using a humanoid skeleton.  
 #[derive(Clone, Reflect, Visit, Debug, Default, ComponentProvider)]
+#[reflect(derived_type = "Node")]
 #[visit(optional)]
 pub struct Ragdoll {
     base: Base,

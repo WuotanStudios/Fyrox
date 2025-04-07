@@ -47,10 +47,11 @@ use fxhash::FxHasher;
 use fyrox_core::{
     algebra::{Vector2, Vector3},
     futures::io::Error,
-    io::FileLoadError,
+    io::FileError,
     num_traits::Bounded,
     reflect::prelude::*,
     sparse::AtomicIndex,
+    uuid,
     uuid::Uuid,
     uuid_provider,
     visitor::{PodVecView, Visit, VisitError, VisitResult, Visitor},
@@ -64,7 +65,6 @@ use image::{ColorType, DynamicImage, ImageError, ImageFormat, Pixel};
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use std::{
-    any::Any,
     fmt::{Debug, Display, Formatter},
     hash::{Hash, Hasher},
     io::Cursor,
@@ -281,6 +281,7 @@ pub struct Texture {
     mip_count: u32,
     anisotropy: f32,
     modifications_counter: u64,
+    sampler_properties_modifications: u64,
     is_render_target: bool,
     #[doc(hidden)]
     #[reflect(hidden)]
@@ -294,14 +295,6 @@ impl TypeUuidProvider for Texture {
 }
 
 impl ResourceData for Texture {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-
     fn type_uuid(&self) -> Uuid {
         <Self as TypeUuidProvider>::type_uuid()
     }
@@ -410,6 +403,7 @@ impl Default for Texture {
             mip_count: 1,
             anisotropy: 16.0,
             modifications_counter: 0,
+            sampler_properties_modifications: 1,
             is_render_target: false,
             cache_index: Default::default(),
         }
@@ -677,10 +671,11 @@ impl TextureImportOptions {
 
 lazy_static! {
     /// Placeholder texture.
-    pub static ref PLACEHOLDER: BuiltInResource<Texture> = BuiltInResource::new(embedded_data_source!("default.png"),
+    pub static ref PLACEHOLDER: BuiltInResource<Texture> = BuiltInResource::new("__PlaceholderTexture", embedded_data_source!("default.png"),
         |data| {
             TextureResource::load_from_memory(
-                ResourceKind::External("__PlaceholderTexture".into()),
+                uuid!("58b0e112-a21a-481f-b305-a2dc5a8bea1f"),
+                ResourceKind::External,
                 data,
                 Default::default()
             )
@@ -716,6 +711,7 @@ pub trait TextureResourceExtension: Sized {
     ///
     /// Main use cases for this method are: procedural textures, icons for GUI.
     fn load_from_memory(
+        resource_uuid: Uuid,
         kind: ResourceKind,
         data: &[u8],
         import_options: TextureImportOptions,
@@ -724,6 +720,7 @@ pub trait TextureResourceExtension: Sized {
     /// Tries to create new texture from given parameters, it may fail only if size of data passed
     /// in does not match with required.
     fn from_bytes(
+        resource_uuid: Uuid,
         kind: TextureKind,
         pixel_kind: TexturePixelKind,
         bytes: Vec<u8>,
@@ -738,6 +735,7 @@ pub trait TextureResourceExtension: Sized {
 impl TextureResourceExtension for TextureResource {
     fn new_render_target(width: u32, height: u32) -> Self {
         Resource::new_ok(
+            Default::default(),
             Default::default(),
             Texture {
                 // Render target will automatically set width and height before rendering.
@@ -757,6 +755,7 @@ impl TextureResourceExtension for TextureResource {
                 mip_count: 1,
                 anisotropy: 1.0,
                 modifications_counter: 0,
+                sampler_properties_modifications: 1,
                 is_render_target: true,
                 cache_index: Default::default(),
             },
@@ -764,32 +763,36 @@ impl TextureResourceExtension for TextureResource {
     }
 
     fn load_from_memory(
+        resource_uuid: Uuid,
         kind: ResourceKind,
         data: &[u8],
         import_options: TextureImportOptions,
     ) -> Result<Self, TextureError> {
         Ok(Resource::new_ok(
+            resource_uuid,
             kind,
             Texture::load_from_memory(data, import_options)?,
         ))
     }
 
     fn from_bytes(
+        resource_uuid: Uuid,
         kind: TextureKind,
         pixel_kind: TexturePixelKind,
         bytes: Vec<u8>,
         resource_kind: ResourceKind,
     ) -> Option<Self> {
         Some(Resource::new_ok(
+            resource_uuid,
             resource_kind,
             Texture::from_bytes(kind, pixel_kind, bytes)?,
         ))
     }
 
     fn deep_clone(&self) -> Self {
-        let kind = self.header().kind.clone();
+        let kind = self.header().kind;
         let data = self.data_ref().clone();
-        Resource::new_ok(kind, data)
+        Resource::new_ok(Uuid::new_v4(), kind, data)
     }
 }
 
@@ -1124,7 +1127,7 @@ pub enum TextureError {
     /// Internal image crate error.
     Image(image::ImageError),
     /// An error occurred during file loading.
-    FileLoadError(FileLoadError),
+    FileLoadError(FileError),
 }
 
 impl Display for TextureError {
@@ -1148,8 +1151,8 @@ impl Display for TextureError {
 
 impl std::error::Error for TextureError {}
 
-impl From<FileLoadError> for TextureError {
-    fn from(v: FileLoadError) -> Self {
+impl From<FileError> for TextureError {
+    fn from(v: FileError) -> Self {
         Self::FileLoadError(v)
     }
 }
@@ -1167,7 +1170,7 @@ impl From<std::io::Error> for TextureError {
 }
 
 fn ceil_div_4(x: u32) -> u32 {
-    (x + 3) / 4
+    x.div_ceil(4)
 }
 
 /// Texture compression options.
@@ -1528,6 +1531,7 @@ impl Texture {
                 is_render_target: false,
                 cache_index: Default::default(),
                 lod_bias: import_options.lod_bias,
+                sampler_properties_modifications: 1,
             })
         } else {
             // Commonly used formats are all rectangle textures.
@@ -1666,6 +1670,7 @@ impl Texture {
                 is_render_target: false,
                 cache_index: Default::default(),
                 lod_bias: import_options.lod_bias,
+                sampler_properties_modifications: 1,
             })
         }
     }
@@ -1712,6 +1717,7 @@ impl Texture {
     #[inline]
     pub fn set_minification_filter(&mut self, filter: TextureMinificationFilter) {
         self.minification_filter = filter;
+        self.sampler_properties_modifications += 1;
     }
 
     /// Returns current minification filter.
@@ -1724,6 +1730,7 @@ impl Texture {
     #[inline]
     pub fn set_magnification_filter(&mut self, filter: TextureMagnificationFilter) {
         self.magnification_filter = filter;
+        self.sampler_properties_modifications += 1;
     }
 
     /// Returns current magnification filter.
@@ -1736,6 +1743,7 @@ impl Texture {
     #[inline]
     pub fn set_s_wrap_mode(&mut self, s_wrap_mode: TextureWrapMode) {
         self.s_wrap_mode = s_wrap_mode;
+        self.sampler_properties_modifications += 1;
     }
 
     /// Returns current S coordinate wrap mode.
@@ -1748,6 +1756,7 @@ impl Texture {
     #[inline]
     pub fn set_t_wrap_mode(&mut self, t_wrap_mode: TextureWrapMode) {
         self.t_wrap_mode = t_wrap_mode;
+        self.sampler_properties_modifications += 1;
     }
 
     /// Returns current T coordinate wrap mode.
@@ -1760,6 +1769,11 @@ impl Texture {
     #[inline]
     pub fn set_r_wrap_mode(&mut self, r_wrap_mode: TextureWrapMode) {
         self.r_wrap_mode = r_wrap_mode;
+        self.sampler_properties_modifications += 1;
+    }
+
+    pub fn sampler_modifications_count(&self) -> u64 {
+        self.sampler_properties_modifications
     }
 
     /// Returns current T coordinate wrap mode.
@@ -1836,6 +1850,7 @@ impl Texture {
     /// of highest resolution mipmap (lowest mipmap level). The initial value is -1000.0.
     #[inline]
     pub fn set_min_lod(&mut self, min_lod: f32) {
+        self.sampler_properties_modifications += 1;
         self.min_lod = min_lod;
     }
 
@@ -1849,6 +1864,7 @@ impl Texture {
     /// of the lowest resolution mipmap (highest mipmap level). The initial value is 1000.
     #[inline]
     pub fn set_max_lod(&mut self, max_lod: f32) {
+        self.sampler_properties_modifications += 1;
         self.max_lod = max_lod;
     }
 
@@ -1866,6 +1882,7 @@ impl Texture {
     /// graphics server. The initial value is 0.0.
     #[inline]
     pub fn set_lod_bias(&mut self, lod_bias: f32) {
+        self.sampler_properties_modifications += 1;
         self.lod_bias = lod_bias;
     }
 
@@ -1938,6 +1955,7 @@ impl Texture {
     /// Typical values are 2.0, 4.0, 8.0, 16.0.
     #[inline]
     pub fn set_anisotropy_level(&mut self, anisotropy: f32) {
+        self.sampler_properties_modifications += 1;
         self.anisotropy = anisotropy.max(1.0);
     }
 

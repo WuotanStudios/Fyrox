@@ -35,6 +35,7 @@ use crate::fyrox::{
         BuildContext, Control, Orientation, Thickness, UiNode, UserInterface, VerticalAlignment,
     },
 };
+
 use fyrox::gui::style::resource::StyleResourceExt;
 use fyrox::gui::style::Style;
 use std::ops::{Deref, DerefMut};
@@ -57,6 +58,7 @@ pub enum SocketDirection {
 }
 
 #[derive(Clone, Debug, Visit, Reflect, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct Socket {
     widget: Widget,
     click_position: Option<Vector2<f32>>,

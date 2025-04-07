@@ -1,6 +1,6 @@
 [package]
 name = "fyrox-core"
-version = "0.36.0"
+version = "0.36.2"
 authors = ["Dmitry Stepanov <d1maxa@yandex.ru>"]
 edition = "2021"
 license = "MIT"
@@ -12,11 +12,11 @@ homepage = "https://fyrox.rs"
 documentation = "https://docs.rs/fyrox-core"
 repository = "https://github.com/FyroxEngine/Fyrox"
 readme = "README.md"
-rust-version = "1.80"
+rust-version = "1.86"
 
 [dependencies]
-fyrox-core-derive = { path = "../fyrox-core-derive", version = "0.36.0" }
-fyrox-math = { path = "../fyrox-math", version = "0.36.0" }
+fyrox-core-derive = { path = "../fyrox-core-derive", version = "0.36.2" }
+fyrox-math = { path = "../fyrox-math", version = "0.36.2" }
 base64 = "0.22.1"
 byteorder = "1.4.3"
 rand = "0.8.4"
@@ -32,7 +32,7 @@ parking_lot = "0.12.0"
 fxhash = "0.2.1"
 bitflags = "2.2.1"
 once_cell = "1.17.1"
-notify = "6"
+notify = "8"
 serde = { version = "1", features = ["derive"] }
 bincode = "1.3.3"
 bytemuck = "1.16.1"

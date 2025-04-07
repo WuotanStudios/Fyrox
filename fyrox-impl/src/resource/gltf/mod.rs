@@ -20,12 +20,6 @@
 
 //! [GltfLoader] enables the importing of *.gltf and *.glb files in the glTF format.
 //! This requires the "gltf" feature.
-use gltf::json;
-use gltf::Document;
-use gltf::Gltf;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
 use crate::asset::io::ResourceIo;
 use crate::asset::loader;
 use crate::asset::manager::ResourceManager;
@@ -37,7 +31,7 @@ use crate::core::pool::Handle;
 use crate::core::TypeUuidProvider;
 use crate::graph::BaseSceneGraph;
 use crate::graph::NodeMapping;
-use crate::gui::core::io::FileLoadError;
+use crate::gui::core::io::FileError;
 use crate::material::MaterialResource;
 use crate::resource::model::{MaterialSearchOptions, Model, ModelImportOptions};
 use crate::resource::texture::{TextureError, TextureResource};
@@ -50,6 +44,12 @@ use crate::scene::node::Node;
 use crate::scene::pivot::PivotBuilder;
 use crate::scene::transform::TransformBuilder;
 use crate::scene::Scene;
+use gltf::json;
+use gltf::Document;
+use gltf::Gltf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use uuid::Uuid;
 
 mod animation;
 mod iter;
@@ -68,7 +68,6 @@ pub use uri::{parse_uri, Scheme, Uri};
 
 type Result<T> = std::result::Result<T, GltfLoadError>;
 
-#[cfg(feature = "gltf_blend_shapes")]
 const TARGET_NAMES_KEY: &str = "targetNames";
 
 #[derive(Debug)]
@@ -80,7 +79,7 @@ enum GltfLoadError {
     MissingEmbeddedBin,
     Gltf(gltf::Error),
     Texture(TextureError),
-    File(FileLoadError),
+    File(FileError),
     Base64(base64::DecodeError),
     Load(LoadError),
     Material(GltfMaterialError),
@@ -106,8 +105,8 @@ impl From<TextureError> for GltfLoadError {
     }
 }
 
-impl From<FileLoadError> for GltfLoadError {
-    fn from(error: FileLoadError) -> Self {
+impl From<FileError> for GltfLoadError {
+    fn from(error: FileError) -> Self {
         GltfLoadError::File(error)
     }
 }
@@ -435,7 +434,7 @@ fn import_meshes(
     let mut stats = GeometryStatistics::default();
     for node in gltf.nodes() {
         if let Some(mesh) = node.mesh() {
-            result.push(import_mesh(mesh, mats, bufs, path, &mut stats)?);
+            result.push(import_mesh(mesh, mats, bufs, &mut stats)?);
         }
     }
     if cfg!(feature = "mesh_analysis") {
@@ -473,17 +472,13 @@ fn import_mesh(
     mesh: gltf::Mesh,
     mats: &[MaterialResource],
     bufs: &[Vec<u8>],
-    path: &Path,
     stats: &mut GeometryStatistics,
 ) -> Result<MeshData> {
-    #[cfg(feature = "gltf_blend_shapes")]
     let morph_info = import_morph_info(&mesh)?;
-    #[cfg(not(feature = "gltf_blend_shapes"))]
-    let morph_info = BlendShapeInfoContainer::default();
     let mut surfs: Vec<Surface> = Vec::with_capacity(mesh.primitives().len());
     let mut blend_shapes: Option<Vec<BlendShape>> = None;
     for prim in mesh.primitives() {
-        if let Some((surf, shapes)) = import_surface(prim, &morph_info, mats, bufs, path, stats)? {
+        if let Some((surf, shapes)) = import_surface(prim, &morph_info, mats, bufs, stats)? {
             surfs.push(surf);
             blend_shapes.get_or_insert(shapes);
         }
@@ -494,7 +489,6 @@ fn import_mesh(
     })
 }
 
-#[cfg(feature = "gltf_blend_shapes")]
 fn import_morph_info(mesh: &gltf::Mesh) -> Result<BlendShapeInfoContainer> {
     let weights: &[f32] = mesh.weights().unwrap_or_default();
     let weights: Vec<f32> = weights.iter().map(|w| w * 100.0).collect();
@@ -528,7 +522,6 @@ fn import_morph_info(mesh: &gltf::Mesh) -> Result<BlendShapeInfoContainer> {
     Ok(BlendShapeInfoContainer::new(names, weights))
 }
 
-#[cfg(feature = "gltf_blend_shapes")]
 fn values_to_strings(values: &[json::Value]) -> Option<Vec<String>> {
     let mut result: Vec<String> = Vec::with_capacity(values.len());
     for v in values {
@@ -546,7 +539,6 @@ fn import_surface(
     morph_info: &BlendShapeInfoContainer,
     mats: &[MaterialResource],
     bufs: &[Vec<u8>],
-    path: &Path,
     stats: &mut GeometryStatistics,
 ) -> Result<Option<(Surface, Vec<BlendShape>)>> {
     if let Some(data) = build_surface_data(&prim, morph_info, bufs, stats)? {
@@ -555,7 +547,8 @@ fn import_surface(
             blend_shapes.clone_from(&shape_con.blend_shapes)
         }
         let mut surf = Surface::new(SurfaceResource::new_ok(
-            ResourceKind::External(path.to_path_buf()),
+            Uuid::new_v4(),
+            ResourceKind::External,
             data,
         ));
         if let Some(mat_index) = prim.material().index() {

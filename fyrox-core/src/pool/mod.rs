@@ -41,13 +41,13 @@
 //! friendliness.
 
 use crate::{reflect::prelude::*, visitor::prelude::*, ComponentProvider};
+use std::cell::UnsafeCell;
 use std::{
     any::{Any, TypeId},
     fmt::Debug,
     future::Future,
     marker::PhantomData,
     ops::{Index, IndexMut},
-    sync::atomic::{self, AtomicIsize},
 };
 
 pub mod handle;
@@ -74,6 +74,26 @@ where
     free_stack: Vec<u32>,
 }
 
+pub trait BorrowAs<Object, Container: PayloadContainer<Element = Object>> {
+    type Target;
+    fn borrow_as_ref(self, pool: &Pool<Object, Container>) -> Option<&Self::Target>;
+    fn borrow_as_mut(self, pool: &mut Pool<Object, Container>) -> Option<&mut Self::Target>;
+}
+
+impl<Object, Container: PayloadContainer<Element = Object> + 'static> BorrowAs<Object, Container>
+    for Handle<Object>
+{
+    type Target = Object;
+
+    fn borrow_as_ref(self, pool: &Pool<Object, Container>) -> Option<&Object> {
+        pool.try_borrow(self)
+    }
+
+    fn borrow_as_mut(self, pool: &mut Pool<Object, Container>) -> Option<&mut Object> {
+        pool.try_borrow_mut(self)
+    }
+}
+
 impl<T, P> Reflect for Pool<T, P>
 where
     T: Reflect,
@@ -82,6 +102,17 @@ where
     #[inline]
     fn source_path() -> &'static str {
         file!()
+    }
+
+    fn derived_types() -> &'static [TypeId]
+    where
+        Self: Sized,
+    {
+        &[]
+    }
+
+    fn query_derived_types(&self) -> &'static [TypeId] {
+        Self::derived_types()
     }
 
     #[inline]
@@ -95,8 +126,13 @@ where
     }
 
     #[inline]
-    fn fields_info(&self, func: &mut dyn FnMut(&[FieldInfo])) {
+    fn fields_ref(&self, func: &mut dyn FnMut(&[FieldRef])) {
         func(&[])
+    }
+
+    #[inline]
+    fn fields_mut(&mut self, func: &mut dyn FnMut(&mut [FieldMut])) {
+        func(&mut [])
     }
 
     #[inline]
@@ -184,15 +220,22 @@ where
 // Zero - non-borrowed.
 // Negative values - amount of mutable borrows, positive - amount of immutable borrows.
 #[derive(Default, Debug)]
-struct RefCounter(pub AtomicIsize);
+struct RefCounter(pub UnsafeCell<isize>);
+
+unsafe impl Sync for RefCounter {}
+unsafe impl Send for RefCounter {}
 
 impl RefCounter {
-    fn increment(&self) {
-        self.0.fetch_add(1, atomic::Ordering::Relaxed);
+    unsafe fn get(&self) -> isize {
+        *self.0.get()
     }
 
-    fn decrement(&self) {
-        self.0.fetch_sub(1, atomic::Ordering::Relaxed);
+    unsafe fn increment(&self) {
+        *self.0.get() += 1;
+    }
+
+    unsafe fn decrement(&self) {
+        *self.0.get() -= 1;
     }
 }
 
@@ -354,6 +397,19 @@ where
     fn records_get_mut(&mut self, index: u32) -> Option<&mut PoolRecord<T, P>> {
         let index = usize::try_from(index).expect("Index overflowed usize");
         self.records.get_mut(index)
+    }
+
+    #[inline]
+    pub fn typed_ref<Ref>(&self, handle: impl BorrowAs<T, P, Target = Ref>) -> Option<&Ref> {
+        handle.borrow_as_ref(self)
+    }
+
+    #[inline]
+    pub fn typed_mut<Ref>(
+        &mut self,
+        handle: impl BorrowAs<T, P, Target = Ref>,
+    ) -> Option<&mut Ref> {
+        handle.borrow_as_mut(self)
     }
 
     #[inline]
@@ -1296,27 +1352,29 @@ where
     }
 }
 
-impl<T, P> Index<Handle<T>> for Pool<T, P>
+impl<Object, Container, Borrow, Ref> Index<Borrow> for Pool<Object, Container>
 where
-    T: 'static,
-    P: PayloadContainer<Element = T> + 'static,
+    Object: 'static,
+    Container: PayloadContainer<Element = Object> + 'static,
+    Borrow: BorrowAs<Object, Container, Target = Ref>,
 {
-    type Output = T;
+    type Output = Ref;
 
     #[inline]
-    fn index(&self, index: Handle<T>) -> &Self::Output {
-        self.borrow(index)
+    fn index(&self, index: Borrow) -> &Self::Output {
+        self.typed_ref(index).expect("The handle must be valid!")
     }
 }
 
-impl<T, P> IndexMut<Handle<T>> for Pool<T, P>
+impl<Object, Container, Borrow, Ref> IndexMut<Borrow> for Pool<Object, Container>
 where
-    T: 'static,
-    P: PayloadContainer<Element = T> + 'static,
+    Object: 'static,
+    Container: PayloadContainer<Element = Object> + 'static,
+    Borrow: BorrowAs<Object, Container, Target = Ref>,
 {
     #[inline]
-    fn index_mut(&mut self, index: Handle<T>) -> &mut Self::Output {
-        self.borrow_mut(index)
+    fn index_mut(&mut self, index: Borrow) -> &mut Self::Output {
+        self.typed_mut(index).expect("The handle must be valid!")
     }
 }
 

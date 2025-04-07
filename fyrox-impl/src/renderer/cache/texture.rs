@@ -22,26 +22,25 @@ use crate::{
     core::log::{Log, MessageKind},
     renderer::{
         cache::{TemporaryCache, TimeToLive},
-        framework::{
-            error::FrameworkError,
-            gpu_texture::{Coordinate, GpuTexture, PixelKind},
-            server::GraphicsServer,
-        },
+        framework::{error::FrameworkError, gpu_texture::PixelKind, server::GraphicsServer},
     },
     resource::texture::{Texture, TextureResource},
 };
-use fyrox_graphics::gpu_texture::{
-    GpuTextureDescriptor, GpuTextureKind, MagnificationFilter, MinificationFilter, WrapMode,
+use fyrox_graphics::gpu_texture::{GpuTexture, GpuTextureDescriptor, GpuTextureKind};
+use fyrox_graphics::sampler::{
+    GpuSampler, GpuSamplerDescriptor, MagnificationFilter, MinificationFilter, WrapMode,
 };
 use fyrox_texture::{
     TextureKind, TextureMagnificationFilter, TextureMinificationFilter, TexturePixelKind,
     TextureWrapMode,
 };
-use std::{cell::RefCell, rc::Rc};
 
-pub(crate) struct TextureRenderData {
-    pub gpu_texture: Rc<RefCell<dyn GpuTexture>>,
-    pub modifications_counter: u64,
+#[derive(Clone)]
+pub struct TextureRenderData {
+    pub gpu_texture: GpuTexture,
+    pub gpu_sampler: GpuSampler,
+    modifications_counter: u64,
+    sampler_modifications_counter: u64,
 }
 
 #[derive(Default)]
@@ -132,32 +131,42 @@ fn convert_wrap_mode(v: TextureWrapMode) -> WrapMode {
     }
 }
 
+fn create_sampler(
+    server: &dyn GraphicsServer,
+    texture: &Texture,
+) -> Result<GpuSampler, FrameworkError> {
+    server.create_sampler(GpuSamplerDescriptor {
+        mag_filter: convert_magnification_filter(texture.magnification_filter()),
+        min_filter: convert_minification_filter(texture.minification_filter()),
+        s_wrap_mode: convert_wrap_mode(texture.s_wrap_mode()),
+        t_wrap_mode: convert_wrap_mode(texture.t_wrap_mode()),
+        r_wrap_mode: convert_wrap_mode(texture.r_wrap_mode()),
+        anisotropy: texture.anisotropy_level(),
+        min_lod: texture.min_lod(),
+        max_lod: texture.max_lod(),
+        lod_bias: texture.lod_bias(),
+    })
+}
+
 fn create_gpu_texture(
     server: &dyn GraphicsServer,
     texture: &Texture,
 ) -> Result<TextureRenderData, FrameworkError> {
-    server
-        .create_texture(GpuTextureDescriptor {
-            kind: convert_texture_kind(texture.kind()),
-            pixel_kind: convert_pixel_kind(texture.pixel_kind()),
-            mag_filter: convert_magnification_filter(texture.magnification_filter()),
-            min_filter: convert_minification_filter(texture.minification_filter()),
-            mip_count: texture.mip_count() as usize,
-            s_wrap_mode: convert_wrap_mode(texture.s_wrap_mode()),
-            t_wrap_mode: convert_wrap_mode(texture.t_wrap_mode()),
-            r_wrap_mode: convert_wrap_mode(texture.r_wrap_mode()),
-            anisotropy: texture.anisotropy_level(),
-            data: Some(texture.data()),
-            base_level: texture.base_level(),
-            max_level: texture.max_level(),
-            min_lod: texture.min_lod(),
-            max_lod: texture.max_lod(),
-            lod_bias: texture.lod_bias(),
-        })
-        .map(|gpu_texture| TextureRenderData {
-            gpu_texture,
-            modifications_counter: texture.modifications_count(),
-        })
+    let gpu_texture = server.create_texture(GpuTextureDescriptor {
+        kind: convert_texture_kind(texture.kind()),
+        pixel_kind: convert_pixel_kind(texture.pixel_kind()),
+        mip_count: texture.mip_count() as usize,
+        data: Some(texture.data()),
+        base_level: texture.base_level(),
+        max_level: texture.max_level(),
+    })?;
+
+    Ok(TextureRenderData {
+        gpu_texture,
+        gpu_sampler: create_sampler(server, texture)?,
+        modifications_counter: texture.modifications_count(),
+        sampler_modifications_counter: texture.sampler_modifications_count(),
+    })
 }
 
 impl TextureCache {
@@ -187,7 +196,7 @@ impl TextureCache {
         &mut self,
         server: &dyn GraphicsServer,
         texture_resource: &TextureResource,
-    ) -> Option<&Rc<RefCell<dyn GpuTexture>>> {
+    ) -> Option<&TextureRenderData> {
         let mut texture_data_guard = texture_resource.state();
 
         if let Some(texture) = texture_data_guard.data() {
@@ -202,8 +211,7 @@ impl TextureCache {
                     // Data might change from last frame, so we have to check it and upload new if so.
                     let modifications_count = texture.modifications_count();
                     if entry.modifications_counter != modifications_count {
-                        let mut gpu_texture = entry.gpu_texture.borrow_mut();
-                        if let Err(e) = gpu_texture.set_data(
+                        if let Err(e) = entry.gpu_texture.set_data(
                             convert_texture_kind(texture.kind()),
                             convert_pixel_kind(texture.pixel_kind()),
                             texture.mip_count() as usize,
@@ -218,39 +226,12 @@ impl TextureCache {
                         }
                     }
 
-                    let mut gpu_texture = entry.gpu_texture.borrow_mut();
-
-                    let new_mag_filter =
-                        convert_magnification_filter(texture.magnification_filter());
-                    if gpu_texture.magnification_filter() != new_mag_filter {
-                        gpu_texture.set_magnification_filter(new_mag_filter);
+                    if entry.sampler_modifications_counter != texture.sampler_modifications_count()
+                    {
+                        entry.gpu_sampler = create_sampler(server, texture).unwrap();
                     }
 
-                    let new_min_filter = convert_minification_filter(texture.minification_filter());
-                    if gpu_texture.minification_filter() != new_min_filter {
-                        gpu_texture.set_minification_filter(new_min_filter);
-                    }
-
-                    if gpu_texture.anisotropy().ne(&texture.anisotropy_level()) {
-                        gpu_texture.set_anisotropy(texture.anisotropy_level());
-                    }
-
-                    let new_s_wrap_mode = convert_wrap_mode(texture.s_wrap_mode());
-                    if gpu_texture.wrap_mode(Coordinate::S) != new_s_wrap_mode {
-                        gpu_texture.set_wrap(Coordinate::S, new_s_wrap_mode);
-                    }
-
-                    let new_t_wrap_mode = convert_wrap_mode(texture.t_wrap_mode());
-                    if gpu_texture.wrap_mode(Coordinate::T) != new_t_wrap_mode {
-                        gpu_texture.set_wrap(Coordinate::T, new_t_wrap_mode);
-                    }
-
-                    let new_r_wrap_mode = convert_wrap_mode(texture.r_wrap_mode());
-                    if gpu_texture.wrap_mode(Coordinate::R) != new_r_wrap_mode {
-                        gpu_texture.set_wrap(Coordinate::R, new_r_wrap_mode);
-                    }
-
-                    return Some(&entry.gpu_texture);
+                    return Some(entry);
                 }
                 Err(e) => {
                     drop(texture_data_guard);
@@ -291,9 +272,10 @@ impl TextureCache {
     /// for a certain time period (see [`TimeToLive`]).
     pub fn try_register(
         &mut self,
+        server: &dyn GraphicsServer,
         texture: &TextureResource,
-        gpu_texture: Rc<RefCell<dyn GpuTexture>>,
-    ) {
+        gpu_texture: GpuTexture,
+    ) -> Result<(), FrameworkError> {
         let data = texture.data_ref();
         let index = data.cache_index.clone();
         let entry = self.cache.get_mut(&index);
@@ -301,11 +283,14 @@ impl TextureCache {
             self.cache.spawn(
                 TextureRenderData {
                     gpu_texture,
+                    gpu_sampler: create_sampler(server, &data)?,
                     modifications_counter: data.modifications_count(),
+                    sampler_modifications_counter: data.sampler_modifications_count(),
                 },
                 index,
                 TimeToLive::default(),
             );
         }
+        Ok(())
     }
 }

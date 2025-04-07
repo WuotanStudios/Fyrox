@@ -47,6 +47,7 @@ use crate::{
     BuildContext, Control, HorizontalAlignment, Orientation, RestrictionEntry, Thickness, UiNode,
     UserInterface, VerticalAlignment,
 };
+
 use fyrox_graph::{
     constructor::{ConstructorProvider, GraphNodeConstructor},
     BaseSceneGraph, SceneGraph, SceneGraphNode,
@@ -243,6 +244,7 @@ impl MenuItemMessage {
 /// }
 /// ```
 #[derive(Default, Clone, Visit, Reflect, Debug, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct Menu {
     widget: Widget,
     active: bool,
@@ -451,6 +453,7 @@ impl ItemsContainer {
 /// Menu item is a widget with arbitrary content, that has a "floating" panel (popup) for sub-items if the menu item. This was menu items can form
 /// arbitrary hierarchies. See [`Menu`] docs for examples.
 #[derive(Default, Clone, Debug, Visit, Reflect, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
 pub struct MenuItem {
     /// Base widget of the menu item.
     pub widget: Widget,
@@ -492,7 +495,7 @@ crate::define_widget_deref!(MenuItem);
 impl MenuItem {
     fn is_opened(&self, ui: &UserInterface) -> bool {
         ui.try_get_of_type::<ContextMenu>(*self.items_panel)
-            .map_or(false, |items_panel| *items_panel.popup.is_open)
+            .is_some_and(|items_panel| *items_panel.popup.is_open)
     }
 
     fn sync_arrow_visibility(&self, ui: &UserInterface) {
@@ -583,14 +586,29 @@ impl Control for MenuItem {
                 WidgetMessage::MouseDown { .. } => {
                     let menu = find_menu(self.parent(), ui);
                     if menu.is_some() {
-                        // Activate menu so it user will be able to open submenus by
-                        // mouse hover.
-                        ui.send_message(MenuMessage::activate(menu, MessageDirection::ToWidget));
+                        if self.is_opened(ui) {
+                            ui.send_message(MenuItemMessage::close(
+                                self.handle(),
+                                MessageDirection::ToWidget,
+                                true,
+                            ));
+                            ui.send_message(MenuMessage::deactivate(
+                                menu,
+                                MessageDirection::ToWidget,
+                            ));
+                        } else {
+                            // Activate menu so it user will be able to open submenus by
+                            // mouse hover.
+                            ui.send_message(MenuMessage::activate(
+                                menu,
+                                MessageDirection::ToWidget,
+                            ));
 
-                        ui.send_message(MenuItemMessage::open(
-                            self.handle(),
-                            MessageDirection::ToWidget,
-                        ));
+                            ui.send_message(MenuItemMessage::open(
+                                self.handle(),
+                                MessageDirection::ToWidget,
+                            ));
+                        }
                     }
                 }
                 WidgetMessage::MouseUp { .. } => {
@@ -683,7 +701,7 @@ impl Control for MenuItem {
                         }
                     }
                     MenuItemMessage::Open => {
-                        if !self.items_container.is_empty() {
+                        if !self.items_container.is_empty() && !self.is_opened(ui) {
                             let placement = match *self.placement {
                                 MenuItemPlacement::Bottom => Placement::LeftBottom(self.handle),
                                 MenuItemPlacement::Right => Placement::RightTop(self.handle),
@@ -1210,6 +1228,7 @@ impl MenuItemBuilder {
 /// an ability for keyboard navigation.
 #[derive(Default, Clone, Debug, Visit, Reflect, TypeUuidProvider, ComponentProvider)]
 #[type_uuid(id = "ad8e9e76-c213-4232-9bab-80ebcabd69fa")]
+#[reflect(derived_type = "UiNode")]
 pub struct ContextMenu {
     /// Inner popup widget of the context menu.
     #[component(include)]

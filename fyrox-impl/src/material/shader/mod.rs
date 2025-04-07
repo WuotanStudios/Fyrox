@@ -27,6 +27,8 @@
 //!
 //! ```ron
 //! (
+//!     name: "MyShader",
+//!
 //!     // A set of resources, the maximum amount of resources is limited by your GPU. The engine
 //!     // guarantees, that there could at least 16 textures and 16 resource groups per shader.
 //!     resources: [
@@ -35,11 +37,20 @@
 //!             name: "diffuseTexture",
 //!
 //!             // Value has limited set of possible variants.
-//!             value: Texture(kind: Sampler2D, fallback: White),
+//!             kind: Texture(kind: Sampler2D, fallback: White),
 //!
 //!             binding: 0
 //!         ),
-//!
+//!         (
+//!             name: "properties",
+//!             kind: PropertyGroup([
+//!                 (
+//!                     name: "diffuseColor",
+//!                     kind: Color(r: 255, g: 255, b: 255, a: 255),
+//!                 ),
+//!             ]),
+//!             binding: 0
+//!         ),
 //!         // The following property groups are built-in and provides useful data for each shader.
 //!         (
 //!             name: "fyrox_instanceData",
@@ -130,20 +141,20 @@
 //!                     write_mask: 0xFFFF_FFFF,
 //!                 ),
 //!
-//!                 // Scissor box
-//!                 scissor_box: Some(ScissorBox(
-//!                     x: 10,
-//!                     y: 20,
-//!                     width: 100,
-//!                     height: 30
-//!                 ))
+//!                 // Scissor box. Could be something like this:
+//!                 //
+//!                 // scissor_box: Some(ScissorBox(
+//!                 //    x: 10,
+//!                 //    y: 20,
+//!                 //    width: 100,
+//!                 //    height: 30
+//!                 // ))
+//!                 scissor_box: None
 //!             ),
 //!
 //!             // Vertex shader code.
 //!             vertex_shader:
 //!                 r#"
-//!                 #version 330 core
-//!
 //!                 layout(location = 0) in vec3 vertexPosition;
 //!                 layout(location = 1) in vec2 vertexTexCoord;
 //!
@@ -152,24 +163,22 @@
 //!                 void main()
 //!                 {
 //!                     texCoord = vertexTexCoord;
-//!                     gl_Position = fyrox_instanceData.worldViewProjection * vertexPosition;
+//!                     gl_Position = fyrox_instanceData.worldViewProjection * vec4(vertexPosition, 1.0);
 //!                 }
-//!                 "#;
+//!                 "#,
 //!
-//!             // Pixel shader code.
-//!             pixel_shader:
+//!             // Fragment shader code.
+//!             fragment_shader:
 //!                 r#"
-//!                 #version 330 core
-//!
 //!                 out vec4 FragColor;
 //!
 //!                 in vec2 texCoord;
 //!
 //!                 void main()
 //!                 {
-//!                     FragColor = diffuseColor * texture(diffuseTexture, texCoord);
+//!                     FragColor = properties.diffuseColor * texture(diffuseTexture, texCoord);
 //!                 }
-//!                 "#;
+//!                 "#,
 //!         )
 //!     ],
 //! )
@@ -197,8 +206,7 @@
 //! rendered object (depth, normal, albedo, etc.). These textures then are used for physically-based
 //! lighting. Use this pass when you want the standard lighting to work with your objects.
 //!
-//! - `Forward` - A pass that draws an object directly in render target. This pass is very
-//! limiting, it does not support lighting, shadows, etc. It should be only used to render
+//! - `Forward` - A pass that draws an object directly in a render target. It could be used to render
 //! translucent objects.
 //!
 //! - `SpotShadow` - A pass that emits depth values for an object, later this depth map will be
@@ -348,7 +356,7 @@
 //!             kind: PropertyGroup([
 //!                 (
 //!                     name: "texCoordScale",
-//!                     kind: Vector2((1.0, 1.0)),
+//!                     kind: Vector2(value: (1.0, 1.0)),
 //!                 ),
 //!                 (
 //!                     name: "diffuseColor",
@@ -442,8 +450,8 @@ use crate::{
         Resource, ResourceData, SHADER_RESOURCE_UUID,
     },
     core::{
-        io::FileLoadError, reflect::prelude::*, sparse::AtomicIndex, uuid::Uuid,
-        visitor::prelude::*, TypeUuidProvider,
+        io::FileError, reflect::prelude::*, sparse::AtomicIndex, uuid::Uuid, visitor::prelude::*,
+        TypeUuidProvider,
     },
     lazy_static::lazy_static,
     renderer::framework::{
@@ -451,21 +459,21 @@ use crate::{
         DrawParameters,
     },
 };
-use fyrox_core::algebra;
+use fyrox_core::{algebra, some_or_continue};
 pub use fyrox_graphics::gpu_program::{
     SamplerFallback, ShaderResourceDefinition, ShaderResourceKind,
 };
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 use std::{
-    any::Any,
     error::Error,
     fmt::{Display, Formatter},
     fs::File,
-    io::{Cursor, Write},
+    io::Write,
     path::Path,
     sync::Arc,
 };
+use uuid::uuid;
 
 pub mod loader;
 
@@ -499,6 +507,9 @@ pub const STANDARD_TWOSIDES_SHADER_SRC: &str = include_str!("standard/standard-t
 
 /// A name of the standard terrain shader.
 pub const STANDARD_TERRAIN_SHADER_NAME: &str = "StandardTerrain";
+
+/// A name of the standard tile shader.
+pub const STANDARD_TILE_SHADER_NAME: &str = "StandardTile";
 
 /// A name of the standard sprite shader.
 pub const STANDARD_SPRITE_SHADER_NAME: &str = "StandardSprite";
@@ -555,11 +566,18 @@ pub struct RenderPassDefinition {
     /// A name of render pass.
     pub name: String,
     /// A set of parameters that will be used in a render pass.
+    #[serde(default)]
     pub draw_parameters: DrawParameters,
     /// A source code of vertex shader.
     pub vertex_shader: String,
+    /// Vertex shader line number.
+    #[serde(default)]
+    pub vertex_shader_line: isize,
     /// A source code of fragment shader.
     pub fragment_shader: String,
+    /// Fragment shader line number.
+    #[serde(default)]
+    pub fragment_shader_line: isize,
 }
 
 /// A definition of the shader.
@@ -571,6 +589,10 @@ pub struct ShaderDefinition {
     pub passes: Vec<RenderPassDefinition>,
     /// A set of resource definitions.
     pub resources: Vec<ShaderResourceDefinition>,
+    /// A list of names of disabled render passes. It is used to strictly indicate that certain
+    /// passes are intentionally disabled in the rendering process.
+    #[serde(default)]
+    pub disabled_passes: Vec<String>,
 }
 
 impl ShaderDefinition {
@@ -579,20 +601,60 @@ impl ShaderDefinition {
     pub const MAX_LIGHTS: usize = 16;
 
     /// Maximum amount of bone matrices per shader.
-    pub const MAX_BONE_MATRICES: usize = 256;
+    pub const MAX_BONE_MATRICES: usize = 255;
 
     /// Maximum amount of blend shape weight groups (packed weights of blend shapes into vec4).
     pub const MAX_BLEND_SHAPE_WEIGHT_GROUPS: usize = 32;
 
-    fn from_buf(buf: Vec<u8>) -> Result<Self, ShaderError> {
-        let mut definition: ShaderDefinition = ron::de::from_reader(Cursor::new(buf))?;
-        definition.generate_built_in_resources();
-        Ok(definition)
+    fn find_shader_line_locations(&mut self, str: &str) {
+        let mut line_ends = Vec::new();
+        for (i, ch) in str.bytes().enumerate() {
+            if ch == b'\n' {
+                line_ends.push(i);
+            }
+        }
+        if str.bytes().last().is_some_and(|ch| ch != b'\n') {
+            line_ends.push(str.len());
+        }
+
+        fn find_line(line_ends: &[usize], byte_pos: usize) -> isize {
+            line_ends
+                .windows(2)
+                .enumerate()
+                .find_map(|(line_num, ends)| {
+                    if (ends[0]..ends[1]).contains(&byte_pos) {
+                        Some(line_num)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0) as isize
+                + 1
+        }
+
+        let vertex_shader_regex = regex::Regex::new(r#"vertex_shader\s*:\s*r?#*""#).unwrap();
+        let fragment_shader_regex = regex::Regex::new(r#"fragment_shader\s*:\s*r?#*""#).unwrap();
+
+        let mut substr = str;
+        for pass in self.passes.iter_mut() {
+            let name_location = some_or_continue!(substr.find(&format!("\"{}\"", pass.name)));
+            let vertex_shader_location = some_or_continue!(vertex_shader_regex.find(substr));
+            let fragment_shader_location = some_or_continue!(fragment_shader_regex.find(substr));
+            let offset = str.len() - substr.len();
+            pass.vertex_shader_line = find_line(&line_ends, offset + vertex_shader_location.end());
+            pass.fragment_shader_line =
+                find_line(&line_ends, offset + fragment_shader_location.end());
+            let max = name_location
+                .max(vertex_shader_location.end())
+                .max(fragment_shader_location.end());
+            substr = &substr[(max + 1)..];
+        }
     }
 
     fn from_str(str: &str) -> Result<Self, ShaderError> {
         let mut definition: ShaderDefinition = ron::de::from_str(str)?;
         definition.generate_built_in_resources();
+        definition.find_shader_line_locations(str);
         Ok(definition)
     }
 
@@ -609,31 +671,58 @@ impl ShaderDefinition {
                     properties.extend([
                         ShaderProperty::new(
                             "viewProjectionMatrix",
-                            Matrix4(algebra::Matrix4::identity()),
+                            Matrix4 {
+                                value: algebra::Matrix4::identity(),
+                            },
                         ),
-                        ShaderProperty::new("position", Vector3(Default::default())),
-                        ShaderProperty::new("upVector", Vector3(Default::default())),
-                        ShaderProperty::new("sideVector", Vector3(Default::default())),
-                        ShaderProperty::new("zNear", Float(0.0)),
-                        ShaderProperty::new("zFar", Float(0.0)),
-                        ShaderProperty::new("zRange", Float(0.0)),
+                        ShaderProperty::new(
+                            "position",
+                            Vector3 {
+                                value: Default::default(),
+                            },
+                        ),
+                        ShaderProperty::new(
+                            "upVector",
+                            Vector3 {
+                                value: Default::default(),
+                            },
+                        ),
+                        ShaderProperty::new(
+                            "sideVector",
+                            Vector3 {
+                                value: Default::default(),
+                            },
+                        ),
+                        ShaderProperty::new("zNear", Float { value: 0.0 }),
+                        ShaderProperty::new("zFar", Float { value: 0.0 }),
+                        ShaderProperty::new("zRange", Float { value: 0.0 }),
                     ]);
                 }
                 "fyrox_lightData" => {
                     properties.clear();
                     properties.extend([
-                        ShaderProperty::new("lightPosition", Vector3(Default::default())),
-                        ShaderProperty::new("ambientLightColor", Vector4(Default::default())),
+                        ShaderProperty::new(
+                            "lightPosition",
+                            Vector3 {
+                                value: Default::default(),
+                            },
+                        ),
+                        ShaderProperty::new(
+                            "ambientLightColor",
+                            Vector4 {
+                                value: Default::default(),
+                            },
+                        ),
                     ]);
                 }
                 "fyrox_graphicsSettings" => {
                     properties.clear();
-                    properties.extend([ShaderProperty::new("usePOM", Bool(false))]);
+                    properties.extend([ShaderProperty::new("usePOM", Bool { value: false })]);
                 }
                 "fyrox_lightsBlock" => {
                     properties.clear();
                     properties.extend([
-                        ShaderProperty::new("lightCount", Int(0)),
+                        ShaderProperty::new("lightCount", Int { value: 0 }),
                         ShaderProperty::new(
                             "lightsColorRadius",
                             Vector4Array {
@@ -667,13 +756,20 @@ impl ShaderDefinition {
                 "fyrox_instanceData" => {
                     properties.clear();
                     properties.extend([
-                        ShaderProperty::new("worldMatrix", Matrix4(algebra::Matrix4::identity())),
+                        ShaderProperty::new(
+                            "worldMatrix",
+                            Matrix4 {
+                                value: algebra::Matrix4::identity(),
+                            },
+                        ),
                         ShaderProperty::new(
                             "worldViewProjection",
-                            Matrix4(algebra::Matrix4::identity()),
+                            Matrix4 {
+                                value: algebra::Matrix4::identity(),
+                            },
                         ),
-                        ShaderProperty::new("blendShapesCount", Int(0)),
-                        ShaderProperty::new("useSkeletalAnimation", Bool(false)),
+                        ShaderProperty::new("blendShapesCount", Int { value: 0 }),
+                        ShaderProperty::new("useSkeletalAnimation", Bool { value: false }),
                         ShaderProperty::new(
                             "blendShapesWeights",
                             Vector4Array {
@@ -705,9 +801,10 @@ impl Shader {
         path: P,
         io: &dyn ResourceIo,
     ) -> Result<Self, ShaderError> {
-        let content = io.load_file(path.as_ref()).await?;
+        let bytes = io.load_file(path.as_ref()).await?;
+        let content = String::from_utf8_lossy(&bytes);
         Ok(Self {
-            definition: ShaderDefinition::from_buf(content)?,
+            definition: ShaderDefinition::from_str(&content)?,
             cache_index: Default::default(),
         })
     }
@@ -733,14 +830,6 @@ impl Shader {
 }
 
 impl ResourceData for Shader {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-
     fn type_uuid(&self) -> Uuid {
         <Self as TypeUuidProvider>::type_uuid()
     }
@@ -762,7 +851,7 @@ impl ResourceData for Shader {
 #[derive(Debug)]
 pub enum ShaderError {
     /// An i/o error has occurred.
-    Io(FileLoadError),
+    Io(FileError),
 
     /// A parsing error has occurred.
     ParseError(ron::error::SpannedError),
@@ -793,8 +882,8 @@ impl From<ron::error::SpannedError> for ShaderError {
     }
 }
 
-impl From<FileLoadError> for ShaderError {
-    fn from(e: FileLoadError) -> Self {
+impl From<FileError> for ShaderError {
+    fn from(e: FileError) -> Self {
         Self::Io(e)
     }
 }
@@ -806,7 +895,7 @@ pub type ShaderResource = Resource<Shader>;
 pub trait ShaderResourceExtension: Sized {
     /// Creates new shader from given string. Input string must have the format defined in
     /// examples for [`ShaderResource`].
-    fn from_str(str: &str, kind: ResourceKind) -> Result<Self, ShaderError>;
+    fn from_str(id: Uuid, str: &str, kind: ResourceKind) -> Result<Self, ShaderError>;
 
     /// Returns an instance of standard shader.
     fn standard() -> Self;
@@ -823,16 +912,19 @@ pub trait ShaderResourceExtension: Sized {
     /// Returns an instance of standard terrain shader.
     fn standard_terrain() -> Self;
 
+    /// Returns an instance of standard tile shader.
+    fn standard_tile() -> Self;
+
     /// Returns an instance of standard two-sides terrain shader.
     fn standard_twosides() -> Self;
 
     /// Returns a list of standard shader.
-    fn standard_shaders() -> [&'static BuiltInResource<Shader>; 6];
+    fn standard_shaders() -> [&'static BuiltInResource<Shader>; 7];
 }
 
 impl ShaderResourceExtension for ShaderResource {
-    fn from_str(str: &str, kind: ResourceKind) -> Result<Self, ShaderError> {
-        Ok(Resource::new_ok(kind, Shader::from_string(str)?))
+    fn from_str(id: Uuid, str: &str, kind: ResourceKind) -> Result<Self, ShaderError> {
+        Ok(Resource::new_ok(id, kind, Shader::from_string(str)?))
     }
 
     fn standard() -> Self {
@@ -855,11 +947,15 @@ impl ShaderResourceExtension for ShaderResource {
         STANDARD_TERRAIN.resource()
     }
 
+    fn standard_tile() -> Self {
+        STANDARD_TILE.resource()
+    }
+
     fn standard_twosides() -> Self {
         STANDARD_TWOSIDES.resource()
     }
 
-    fn standard_shaders() -> [&'static BuiltInResource<Shader>; 6] {
+    fn standard_shaders() -> [&'static BuiltInResource<Shader>; 7] {
         [
             &STANDARD,
             &STANDARD_2D,
@@ -867,50 +963,78 @@ impl ShaderResourceExtension for ShaderResource {
             &STANDARD_SPRITE,
             &STANDARD_TERRAIN,
             &STANDARD_TWOSIDES,
+            &STANDARD_TILE,
         ]
     }
 }
 
 lazy_static! {
-    static ref STANDARD: BuiltInResource<Shader> =
-        BuiltInResource::new(embedded_data_source!("standard/standard.shader"), |data| {
+    static ref STANDARD: BuiltInResource<Shader> = BuiltInResource::new(
+        STANDARD_SHADER_NAME,
+        embedded_data_source!("standard/standard.shader"),
+        |data| {
             ShaderResource::new_ok(
-                STANDARD_SHADER_NAME.into(),
+                uuid!("87195f6e-cba4-4c27-9f89-d0bf726db965"),
+                ResourceKind::External,
                 Shader::from_string_bytes(data).unwrap(),
             )
-        });
+        }
+    );
     static ref STANDARD_2D: BuiltInResource<Shader> = BuiltInResource::new(
+        STANDARD_2D_SHADER_NAME,
         embedded_data_source!("standard/standard2d.shader"),
         |data| ShaderResource::new_ok(
-            STANDARD_2D_SHADER_NAME.into(),
+            uuid!("55fa05b0-3c25-4e46-bae7-65f093185b75"),
+            ResourceKind::External,
             Shader::from_string_bytes(data).unwrap(),
         )
     );
     static ref STANDARD_PARTICLE_SYSTEM: BuiltInResource<Shader> = BuiltInResource::new(
+        STANDARD_PARTICLE_SYSTEM_SHADER_NAME,
         embedded_data_source!("standard/standard_particle_system.shader"),
         |data| ShaderResource::new_ok(
-            STANDARD_PARTICLE_SYSTEM_SHADER_NAME.into(),
+            uuid!("eb474445-6a25-4481-bca9-f919699c300f"),
+            ResourceKind::External,
             Shader::from_string_bytes(data).unwrap(),
         )
     );
     static ref STANDARD_SPRITE: BuiltInResource<Shader> = BuiltInResource::new(
+        STANDARD_SPRITE_SHADER_NAME,
         embedded_data_source!("standard/standard_sprite.shader"),
         |data| ShaderResource::new_ok(
-            STANDARD_SPRITE_SHADER_NAME.into(),
+            uuid!("a135826a-4c1b-46d5-ba1f-0c9a226aa52c"),
+            ResourceKind::External,
             Shader::from_string_bytes(data).unwrap(),
         )
     );
-    static ref STANDARD_TERRAIN: BuiltInResource<Shader> =
-        BuiltInResource::new(embedded_data_source!("standard/terrain.shader"), |data| {
+    static ref STANDARD_TERRAIN: BuiltInResource<Shader> = BuiltInResource::new(
+        STANDARD_TERRAIN_SHADER_NAME,
+        embedded_data_source!("standard/terrain.shader"),
+        |data| {
             ShaderResource::new_ok(
-                STANDARD_TERRAIN_SHADER_NAME.into(),
+                uuid!("4911aafe-9bb1-4115-a958-25b57b87b51e"),
+                ResourceKind::External,
                 Shader::from_string_bytes(data).unwrap(),
             )
-        });
+        }
+    );
+    static ref STANDARD_TILE: BuiltInResource<Shader> = BuiltInResource::new(
+        STANDARD_TILE_SHADER_NAME,
+        embedded_data_source!("standard/tile.shader"),
+        |data| {
+            ShaderResource::new_ok(
+                uuid!("5f29dd3a-ea99-480c-bb02-d2c6420843b1"),
+                ResourceKind::External,
+                Shader::from_string_bytes(data).unwrap(),
+            )
+        }
+    );
     static ref STANDARD_TWOSIDES: BuiltInResource<Shader> = BuiltInResource::new(
+        STANDARD_TWOSIDES_SHADER_NAME,
         embedded_data_source!("standard/standard-two-sides.shader"),
         |data| ShaderResource::new_ok(
-            STANDARD_TWOSIDES_SHADER_NAME.into(),
+            uuid!("f7979409-5185-4e1c-a644-d53cea64af8f"),
+            ResourceKind::External,
             Shader::from_string_bytes(data).unwrap(),
         )
     );
@@ -923,6 +1047,8 @@ mod test {
         ShaderResourceDefinition, ShaderResourceExtension, ShaderResourceKind,
     };
     use fyrox_graphics::gpu_program::SamplerKind;
+    use fyrox_resource::untyped::ResourceKind;
+    use uuid::Uuid;
 
     #[test]
     fn test_shader_load() {
@@ -968,7 +1094,8 @@ mod test {
             )
             "#;
 
-        let shader = ShaderResource::from_str(code, "test".into()).unwrap();
+        let shader =
+            ShaderResource::from_str(Uuid::new_v4(), code, ResourceKind::External).unwrap();
         let data = shader.data_ref();
 
         let reference_definition = ShaderDefinition {
@@ -985,8 +1112,11 @@ mod test {
                 name: "GBuffer".to_string(),
                 draw_parameters: Default::default(),
                 vertex_shader: "<CODE>".to_string(),
+                vertex_shader_line: 35,
                 fragment_shader: "<CODE>".to_string(),
+                fragment_shader_line: 36,
             }],
+            disabled_passes: vec![],
         };
 
         assert_eq!(data.definition, reference_definition);

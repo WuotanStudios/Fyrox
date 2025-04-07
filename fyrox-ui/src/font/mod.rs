@@ -26,13 +26,14 @@ use crate::core::{
 };
 use fxhash::FxHashMap;
 use fyrox_core::math::Rect;
+use fyrox_core::uuid;
+use fyrox_resource::untyped::ResourceKind;
 use fyrox_resource::{
     embedded_data_source, io::ResourceIo, manager::BuiltInResource, untyped::UntypedResource,
     Resource, ResourceData,
 };
 use lazy_static::lazy_static;
 use std::{
-    any::Any,
     error::Error,
     fmt::{Debug, Formatter},
     hash::{Hash, Hasher},
@@ -98,6 +99,9 @@ impl Atlas {
                 // it in the inner font and render/pack it.
 
                 if let Some(char_index) = font.chars().get(&unicode) {
+                    if !height.0.is_finite() || height.0 <= f32::EPSILON {
+                        return None;
+                    }
                     let (metrics, glyph_raster) =
                         font.rasterize_indexed(char_index.get(), height.0);
 
@@ -220,14 +224,6 @@ pub struct Font {
 uuid_provider!(Font = "692fec79-103a-483c-bb0b-9fc3a349cb48");
 
 impl ResourceData for Font {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-
     fn type_uuid(&self) -> Uuid {
         <Self as TypeUuidProvider>::type_uuid()
     }
@@ -269,13 +265,17 @@ impl Hash for FontHeight {
 pub type FontResource = Resource<Font>;
 
 lazy_static! {
-    pub static ref BUILT_IN_FONT: BuiltInResource<Font> =
-        BuiltInResource::new(embedded_data_source!("./built_in_font.ttf"), |data| {
+    pub static ref BUILT_IN_FONT: BuiltInResource<Font> = BuiltInResource::new(
+        "__BUILT_IN_FONT__",
+        embedded_data_source!("./built_in_font.ttf"),
+        |data| {
             FontResource::new_ok(
-                "__BUILT_IN_FONT__".into(),
+                uuid!("77260e8e-f6fa-429c-8009-13dda2673925"),
+                ResourceKind::External,
                 Font::from_memory(data.to_vec(), 1024).unwrap(),
             )
-        });
+        }
+    );
 }
 
 impl Font {

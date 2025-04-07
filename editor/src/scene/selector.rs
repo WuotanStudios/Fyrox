@@ -22,8 +22,9 @@ use crate::{
     fyrox::{
         core::{
             algebra::Vector2, parking_lot::Mutex, pool::ErasedHandle, pool::Handle,
-            reflect::prelude::*, type_traits::prelude::*, uuid_provider, visitor::prelude::*,
+            reflect::prelude::*, type_traits::prelude::*, visitor::prelude::*,
         },
+        fxhash::FxHashSet,
         graph::{BaseSceneGraph, SceneGraph, SceneGraphNode},
         gui::{
             border::BorderBuilder,
@@ -31,11 +32,12 @@ use crate::{
             define_constructor, define_widget_deref,
             draw::DrawingContext,
             grid::{Column, GridBuilder, Row},
-            message::{MessageDirection, OsEvent, UiMessage},
+            message::{KeyCode, MessageDirection, OsEvent, UiMessage},
             scroll_viewer::ScrollViewerBuilder,
             scroll_viewer::ScrollViewerMessage,
             searchbar::{SearchBarBuilder, SearchBarMessage},
             stack_panel::StackPanelBuilder,
+            style::{resource::StyleResourceExt, Style},
             text::TextBuilder,
             tree::{Tree, TreeBuilder, TreeRootBuilder, TreeRootMessage},
             widget::{Widget, WidgetBuilder, WidgetMessage},
@@ -46,19 +48,22 @@ use crate::{
     },
     utils::make_node_name,
 };
-use fyrox::gui::message::KeyCode;
-use fyrox::gui::style::resource::StyleResourceExt;
-use fyrox::gui::style::Style;
+use fyrox::gui::formatted_text::WrapMode;
+use std::hash::{Hash, Hasher};
 use std::{
+    any::{Any, TypeId},
+    fmt::Debug,
     ops::{Deref, DerefMut},
-    sync::mpsc::Sender,
-    sync::Arc,
+    sync::{mpsc::Sender, Arc},
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Eq, Clone, Debug, PartialEq)]
 pub struct HierarchyNode {
     pub name: String,
+    pub inner_type_name: String,
     pub handle: ErasedHandle,
+    pub inner_type_id: TypeId,
+    pub derived_type_ids: Vec<TypeId>,
     pub children: Vec<HierarchyNode>,
 }
 
@@ -68,10 +73,14 @@ impl HierarchyNode {
         G: SceneGraph<Node = N>,
         N: SceneGraphNode<SceneGraph = G>,
     {
-        let node = &graph.node(node_handle);
+        let node = graph.node(node_handle);
 
         Self {
             name: node.name().to_string(),
+            inner_type_name: graph
+                .actual_type_name(node_handle)
+                .unwrap_or_default()
+                .to_string(),
             handle: node_handle.into(),
             children: node
                 .children()
@@ -84,30 +93,8 @@ impl HierarchyNode {
                     }
                 })
                 .collect(),
-        }
-    }
-
-    pub fn from_ui_node(
-        node_handle: Handle<UiNode>,
-        ignored_node: Handle<UiNode>,
-        ui: &UserInterface,
-    ) -> Self {
-        let node = ui.node(node_handle);
-
-        Self {
-            name: node.name().to_owned(),
-            handle: node_handle.into(),
-            children: node
-                .children()
-                .iter()
-                .filter_map(|c| {
-                    if *c == ignored_node {
-                        None
-                    } else {
-                        Some(HierarchyNode::from_ui_node(*c, ignored_node, ui))
-                    }
-                })
-                .collect(),
+            inner_type_id: graph.actual_type_id(node_handle).unwrap(),
+            derived_type_ids: graph.derived_type_ids(node_handle).unwrap(),
         }
     }
 
@@ -126,20 +113,73 @@ impl HierarchyNode {
         None
     }
 
-    fn make_view(&self, ctx: &mut BuildContext) -> Handle<UiNode> {
+    fn make_view(
+        &self,
+        allowed_types: &FxHashSet<AllowedType>,
+        ctx: &mut BuildContext,
+    ) -> Handle<UiNode> {
+        let brush = if allowed_types.contains(&AllowedType::unnamed(self.inner_type_id))
+            || self
+                .derived_type_ids
+                .iter()
+                .any(|derived| allowed_types.contains(&AllowedType::unnamed(*derived)))
+        {
+            ctx.style.property(Style::BRUSH_TEXT)
+        } else {
+            ctx.style.property(Style::BRUSH_LIGHT)
+        };
+
         TreeBuilder::new(
             WidgetBuilder::new().with_user_data(Arc::new(Mutex::new(TreeData {
                 name: self.name.clone(),
                 handle: self.handle,
+                inner_type_id: self.inner_type_id,
+                derived_type_ids: self.derived_type_ids.clone(),
             }))),
         )
-        .with_items(self.children.iter().map(|c| c.make_view(ctx)).collect())
+        .with_items(
+            self.children
+                .iter()
+                .map(|c| c.make_view(allowed_types, ctx))
+                .collect(),
+        )
         .with_content(
-            TextBuilder::new(WidgetBuilder::new())
-                .with_text(make_node_name(&self.name, self.handle))
+            TextBuilder::new(WidgetBuilder::new().with_foreground(brush))
+                .with_text(make_node_name(&self.name, self.handle) + " - " + &self.inner_type_name)
                 .build(ctx),
         )
         .build(ctx)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Visit, Reflect)]
+pub struct SelectedHandle {
+    #[visit(skip)]
+    #[reflect(hidden)]
+    pub inner_type_id: TypeId,
+    #[visit(skip)]
+    #[reflect(hidden)]
+    pub derived_type_ids: Vec<TypeId>,
+    pub handle: ErasedHandle,
+}
+
+impl<T: Reflect> From<Handle<T>> for SelectedHandle {
+    fn from(value: Handle<T>) -> Self {
+        Self {
+            inner_type_id: TypeId::of::<T>(),
+            derived_type_ids: T::derived_types().to_vec(),
+            handle: value.into(),
+        }
+    }
+}
+
+impl Default for SelectedHandle {
+    fn default() -> Self {
+        Self {
+            inner_type_id: ().type_id(),
+            derived_type_ids: Default::default(),
+            handle: Default::default(),
+        }
     }
 }
 
@@ -147,13 +187,13 @@ impl HierarchyNode {
 pub enum NodeSelectorMessage {
     #[allow(dead_code)] // Might be used in the future.
     Hierarchy(HierarchyNode),
-    Selection(Vec<ErasedHandle>),
+    Selection(Vec<SelectedHandle>),
     ChooseFocus,
 }
 
 impl NodeSelectorMessage {
     define_constructor!(NodeSelectorMessage:Hierarchy => fn hierarchy(HierarchyNode), layout: false);
-    define_constructor!(NodeSelectorMessage:Selection => fn selection(Vec<ErasedHandle>), layout: false);
+    define_constructor!(NodeSelectorMessage:Selection => fn selection(Vec<SelectedHandle>), layout: false);
     define_constructor!(NodeSelectorMessage:ChooseFocus => fn choose_focus(), layout: false);
 }
 
@@ -161,15 +201,22 @@ impl NodeSelectorMessage {
 struct TreeData {
     name: String,
     handle: ErasedHandle,
+    inner_type_id: TypeId,
+    pub derived_type_ids: Vec<TypeId>,
 }
 
-#[derive(Clone, Visit, Reflect, Debug, ComponentProvider)]
+#[derive(Debug, Clone, Visit, Reflect, TypeUuidProvider, ComponentProvider)]
+#[reflect(derived_type = "UiNode")]
+#[type_uuid(id = "1d718f90-323c-492d-b057-98d47495900a")]
 pub struct NodeSelector {
     widget: Widget,
     tree_root: Handle<UiNode>,
     search_bar: Handle<UiNode>,
-    selected: Vec<ErasedHandle>,
+    selected: Vec<SelectedHandle>,
     scroll_viewer: Handle<UiNode>,
+    #[visit(skip)]
+    #[reflect(hidden)]
+    allowed_types: FxHashSet<AllowedType>,
 }
 
 define_widget_deref!(NodeSelector);
@@ -198,8 +245,6 @@ fn apply_filter_recursive(node: Handle<UiNode>, filter: &str, ui: &UserInterface
     is_any_match
 }
 
-uuid_provider!(NodeSelector = "1d718f90-323c-492d-b057-98d47495900a");
-
 impl Control for NodeSelector {
     fn handle_routed_message(&mut self, ui: &mut UserInterface, message: &mut UiMessage) {
         self.widget.handle_routed_message(ui, message);
@@ -210,7 +255,8 @@ impl Control for NodeSelector {
             {
                 match msg {
                     NodeSelectorMessage::Hierarchy(hierarchy) => {
-                        let items = vec![hierarchy.make_view(&mut ui.build_ctx())];
+                        let items =
+                            vec![hierarchy.make_view(&self.allowed_types, &mut ui.build_ctx())];
                         ui.send_message(TreeRootMessage::items(
                             self.tree_root,
                             MessageDirection::ToWidget,
@@ -263,7 +309,15 @@ impl Control for NodeSelector {
                     MessageDirection::ToWidget,
                     selection
                         .iter()
-                        .map(|s| ui.node(*s).user_data_cloned::<TreeData>().unwrap().handle)
+                        .map(|s| {
+                            let tree_data = ui.node(*s).user_data_cloned::<TreeData>().unwrap();
+
+                            SelectedHandle {
+                                handle: tree_data.handle,
+                                inner_type_id: tree_data.inner_type_id,
+                                derived_type_ids: tree_data.derived_type_ids,
+                            }
+                        })
                         .collect(),
                 ));
             }
@@ -286,10 +340,11 @@ impl NodeSelector {
             let node = ui.node(node_handle);
 
             if let Some(tree) = node.query_component::<Tree>() {
-                if self
-                    .selected
-                    .contains(&tree.user_data_cloned::<TreeData>().unwrap().handle)
-                {
+                if self.selected.iter().any(|selected| {
+                    let tree_data = tree.user_data_cloned::<TreeData>().unwrap();
+                    tree_data.handle == selected.handle
+                        && tree_data.inner_type_id == selected.inner_type_id
+                }) {
                     selected_trees.push(node_handle);
                 }
             }
@@ -322,6 +377,7 @@ impl NodeSelector {
 pub struct NodeSelectorBuilder {
     widget_builder: WidgetBuilder,
     hierarchy: Option<HierarchyNode>,
+    allowed_types: FxHashSet<AllowedType>,
 }
 
 impl NodeSelectorBuilder {
@@ -329,6 +385,7 @@ impl NodeSelectorBuilder {
         Self {
             widget_builder,
             hierarchy: None,
+            allowed_types: Default::default(),
         }
     }
 
@@ -337,10 +394,15 @@ impl NodeSelectorBuilder {
         self
     }
 
+    pub fn with_allowed_types(mut self, allowed_types: FxHashSet<AllowedType>) -> Self {
+        self.allowed_types = allowed_types;
+        self
+    }
+
     pub fn build(self, ctx: &mut BuildContext) -> Handle<UiNode> {
         let items = self
             .hierarchy
-            .map(|h| vec![h.make_view(ctx)])
+            .map(|h| vec![h.make_view(&self.allowed_types, ctx)])
             .unwrap_or_default();
 
         let tree_root = TreeRootBuilder::new(WidgetBuilder::new().with_tab_index(Some(1)))
@@ -385,19 +447,25 @@ impl NodeSelectorBuilder {
             search_bar,
             selected: Default::default(),
             scroll_viewer,
+            allowed_types: self.allowed_types,
         };
 
         ctx.add_node(UiNode::new(selector))
     }
 }
 
-#[derive(Clone, Visit, Reflect, Debug, ComponentProvider)]
+#[derive(Debug, Clone, Visit, Reflect, TypeUuidProvider, ComponentProvider)]
+#[type_uuid(id = "5bb00f15-d6ec-4f0e-af7e-9472b0e290b4")]
+#[reflect(derived_type = "UiNode")]
 pub struct NodeSelectorWindow {
     #[component(include)]
     window: Window,
     selector: Handle<UiNode>,
     ok: Handle<UiNode>,
     cancel: Handle<UiNode>,
+    #[visit(skip)]
+    #[reflect(hidden)]
+    allowed_types: FxHashSet<AllowedType>,
 }
 
 impl Deref for NodeSelectorWindow {
@@ -432,8 +500,6 @@ impl NodeSelectorWindow {
         ));
     }
 }
-
-uuid_provider!(NodeSelectorWindow = "5bb00f15-d6ec-4f0e-af7e-9472b0e290b4");
 
 impl Control for NodeSelectorWindow {
     fn on_remove(&self, sender: &Sender<UiMessage>) {
@@ -484,7 +550,14 @@ impl Control for NodeSelectorWindow {
                     ui.send_message(WidgetMessage::enabled(
                         self.ok,
                         MessageDirection::ToWidget,
-                        !selection.is_empty(),
+                        !selection.is_empty()
+                            && selection.iter().all(|h| {
+                                self.allowed_types
+                                    .contains(&AllowedType::unnamed(h.inner_type_id))
+                                    || h.derived_type_ids.iter().any(|derived| {
+                                        self.allowed_types.contains(&AllowedType::unnamed(*derived))
+                                    })
+                            }),
                     ));
                 }
             }
@@ -521,9 +594,37 @@ impl Control for NodeSelectorWindow {
     }
 }
 
+#[derive(Clone, Eq, Debug)]
+pub struct AllowedType {
+    pub id: TypeId,
+    pub name: String,
+}
+
+impl AllowedType {
+    pub fn unnamed(id: TypeId) -> Self {
+        Self {
+            id,
+            name: Default::default(),
+        }
+    }
+}
+
+impl Hash for AllowedType {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.id.hash(state)
+    }
+}
+
+impl PartialEq for AllowedType {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
 pub struct NodeSelectorWindowBuilder {
     window_builder: WindowBuilder,
     hierarchy: Option<HierarchyNode>,
+    allowed_types: FxHashSet<AllowedType>,
 }
 
 impl NodeSelectorWindowBuilder {
@@ -531,11 +632,17 @@ impl NodeSelectorWindowBuilder {
         Self {
             window_builder,
             hierarchy: None,
+            allowed_types: Default::default(),
         }
     }
 
     pub fn with_hierarchy(mut self, hierarchy: HierarchyNode) -> Self {
         self.hierarchy = Some(hierarchy);
+        self
+    }
+
+    pub fn with_allowed_types(mut self, allowed_types: FxHashSet<AllowedType>) -> Self {
+        self.allowed_types = allowed_types;
         self
     }
 
@@ -545,9 +652,28 @@ impl NodeSelectorWindowBuilder {
         let selector;
         let content = GridBuilder::new(
             WidgetBuilder::new()
+                .with_child(
+                    TextBuilder::new(
+                        WidgetBuilder::new()
+                            .with_visibility(!self.allowed_types.is_empty())
+                            .with_margin(Thickness::uniform(2.0)),
+                    )
+                    .with_text(
+                        "Select a node of the following type(s):\n".to_string()
+                            + &self
+                                .allowed_types
+                                .iter()
+                                .map(|ty| ty.name.clone())
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                    )
+                    .with_wrap(WrapMode::Letter)
+                    .build(ctx),
+                )
                 .with_child({
-                    selector = NodeSelectorBuilder::new(WidgetBuilder::new())
+                    selector = NodeSelectorBuilder::new(WidgetBuilder::new().on_row(1))
                         .with_hierarchy(self.hierarchy)
+                        .with_allowed_types(self.allowed_types.clone())
                         .build(ctx);
                     selector
                 })
@@ -555,7 +681,7 @@ impl NodeSelectorWindowBuilder {
                     StackPanelBuilder::new(
                         WidgetBuilder::new()
                             .with_margin(Thickness::uniform(2.0))
-                            .on_row(1)
+                            .on_row(2)
                             .on_column(0)
                             .with_horizontal_alignment(HorizontalAlignment::Right)
                             .with_child({
@@ -587,6 +713,7 @@ impl NodeSelectorWindowBuilder {
                 ),
         )
         .add_column(Column::stretch())
+        .add_row(Row::auto())
         .add_row(Row::stretch())
         .add_row(Row::strict(27.0))
         .build(ctx);
@@ -600,6 +727,7 @@ impl NodeSelectorWindowBuilder {
             ok,
             cancel,
             selector,
+            allowed_types: self.allowed_types,
         };
 
         ctx.add_node(UiNode::new(window))

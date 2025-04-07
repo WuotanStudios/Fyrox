@@ -137,7 +137,6 @@ impl CameraController {
         scene_content_root: Handle<Node>,
     ) -> Self {
         let settings = settings.cloned().unwrap_or_default();
-
         let camera;
         let camera_hinge;
         let pivot = PivotBuilder::new(
@@ -696,7 +695,7 @@ impl CameraController {
                 self.stack.extend_from_slice(node.children());
 
                 if !node.global_visibility()
-                    || !filter.as_mut().map_or(true, |func| func(handle, node))
+                    || !filter.as_mut().is_none_or(|func| func(handle, node))
                 {
                     continue;
                 }

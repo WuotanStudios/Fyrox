@@ -22,17 +22,15 @@ use crate::renderer::framework::GeometryBufferExt;
 use crate::{
     renderer::{
         cache::{TemporaryCache, TimeToLive},
-        framework::{
-            error::FrameworkError, geometry_buffer::GeometryBuffer, server::GraphicsServer,
-        },
+        framework::{error::FrameworkError, server::GraphicsServer},
     },
     scene::mesh::surface::{SurfaceData, SurfaceResource},
 };
-use fyrox_core::log::Log;
 use fyrox_graphics::buffer::BufferUsage;
+use fyrox_graphics::geometry_buffer::GpuGeometryBuffer;
 
 struct SurfaceRenderData {
-    buffer: Box<dyn GeometryBuffer>,
+    buffer: GpuGeometryBuffer,
     vertex_modifications_count: u64,
     triangles_modifications_count: u64,
     layout_hash: u64,
@@ -48,7 +46,7 @@ fn create_geometry_buffer(
     server: &dyn GraphicsServer,
 ) -> Result<SurfaceRenderData, FrameworkError> {
     let geometry_buffer =
-        <dyn GeometryBuffer>::from_surface_data(data, BufferUsage::StaticDraw, server)?;
+        GpuGeometryBuffer::from_surface_data(data, BufferUsage::StaticDraw, server)?;
 
     Ok(SurfaceRenderData {
         buffer: geometry_buffer,
@@ -64,7 +62,7 @@ impl GeometryCache {
         server: &dyn GraphicsServer,
         data: &SurfaceResource,
         time_to_live: TimeToLive,
-    ) -> Option<&'a dyn GeometryBuffer> {
+    ) -> Result<&'a GpuGeometryBuffer, FrameworkError> {
         let data = data.data_ref();
 
         match self
@@ -98,12 +96,9 @@ impl GeometryCache {
                             data.geometry_buffer.modifications_count();
                     }
                 }
-                Some(&*entry.buffer)
+                Ok(&entry.buffer)
             }
-            Err(err) => {
-                Log::err(err.to_string());
-                None
-            }
+            Err(err) => Err(err),
         }
     }
 

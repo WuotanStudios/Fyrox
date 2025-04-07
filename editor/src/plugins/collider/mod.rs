@@ -35,11 +35,12 @@ mod segment2d;
 mod triangle;
 mod triangle2d;
 
+use fyrox::gui::widget::WidgetMessage;
+
 use crate::{
     camera::PickingOptions,
     command::SetPropertyCommand,
     fyrox::{
-        asset::untyped::ResourceKind,
         core::{
             algebra::{UnitQuaternion, Vector2, Vector3},
             color::Color,
@@ -53,7 +54,6 @@ use crate::{
         engine::Engine,
         graph::{BaseSceneGraph, SceneGraph, SceneGraphNode},
         gui::{
-            dock::DockingManagerMessage,
             message::{MessageDirection, UiMessage},
             BuildContext, UiNode,
         },
@@ -89,6 +89,8 @@ use crate::{
     settings::Settings,
     Editor, Message,
 };
+
+use super::inspector::InspectorPlugin;
 
 fn try_get_collider_shape(collider: Handle<Node>, scene: &Scene) -> Option<ColliderShape> {
     scene
@@ -270,6 +272,7 @@ fn make_shape_gizmo(
 lazy_static! {
     static ref GIZMO_SHADER: ShaderResource = {
         ShaderResource::from_str(
+            Uuid::new_v4(),
             include_str!("../../../resources/shaders/sprite_gizmo.shader",),
             Default::default(),
         )
@@ -286,7 +289,7 @@ fn make_handle(scene: &mut Scene, root: Handle<Node>, visible: bool) -> Handle<N
     );
 
     let handle = SpriteBuilder::new(BaseBuilder::new().with_visibility(visible))
-        .with_material(MaterialResource::new_ok(ResourceKind::Embedded, material))
+        .with_material(MaterialResource::new_embedded(material))
         .with_size(0.05)
         .with_color(Color::MAROON)
         .build(&mut scene.graph);
@@ -730,24 +733,18 @@ impl EditorPlugin for ColliderPlugin {
                 });
 
                 if self.panel.is_none() {
+                    let inspector = editor.plugins.get::<InspectorPlugin>();
                     let ui = editor.engine.user_interfaces.first_mut();
-                    let panel =
-                        ColliderControlPanel::new(editor.scene_viewer.frame(), &mut ui.build_ctx());
-                    ui.send_message(DockingManagerMessage::add_floating_window(
-                        editor.docking_manager,
+                    let panel = ColliderControlPanel::new(&mut ui.build_ctx());
+                    ui.send_message(WidgetMessage::link(
+                        panel.root_widget,
                         MessageDirection::ToWidget,
-                        panel.window,
+                        inspector.head,
                     ));
-                    panel.open(ui);
                     self.panel = Some(panel);
                 }
             } else if let Some(panel) = self.panel.take() {
                 let ui = editor.engine.user_interfaces.first();
-                ui.send_message(DockingManagerMessage::remove_floating_window(
-                    editor.docking_manager,
-                    MessageDirection::ToWidget,
-                    panel.window,
-                ));
                 panel.destroy(ui);
             }
         }

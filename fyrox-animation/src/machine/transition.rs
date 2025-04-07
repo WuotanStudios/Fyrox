@@ -66,6 +66,14 @@ macro_rules! define_two_args_node {
                 file!()
             }
 
+            fn derived_types() -> &'static [TypeId] {
+                &[]
+            }
+
+            fn query_derived_types(&self) -> &'static [TypeId] {
+                Self::derived_types()
+            }
+
             fn type_name(&self) -> &'static str {
                 type_name::<Self>()
             }
@@ -82,41 +90,94 @@ macro_rules! define_two_args_node {
                 env!("CARGO_PKG_NAME")
             }
 
-            fn fields_info(&self, func: &mut dyn FnMut(&[FieldInfo])) {
+            fn fields_ref(&self, func: &mut dyn FnMut(&[FieldRef])) {
                 func(&[
-                    FieldInfo {
-                        owner_type_id: TypeId::of::<Self>(),
-                        name: "Lhs",
-                        display_name: "Lhs",
-                        description: "",
-                        type_name: type_name::<Self>(),
-                        value: &*self.lhs,
-                        reflect_value: &*self.lhs,
-                        read_only: false,
-                        immutable_collection: false,
-                        min_value: None,
-                        max_value: None,
-                        step: None,
-                        precision: None,
-                        doc: "",
+                    {
+                        static METADATA: FieldMetadata = FieldMetadata {
+                            name: "Lhs",
+                            display_name: "Lhs",
+                            description: "",
+                            tag: "",
+                            read_only: false,
+                            immutable_collection: false,
+                            min_value: None,
+                            max_value: None,
+                            step: None,
+                            precision: None,
+                            doc: "",
+                        };
+
+                        FieldRef {
+                            metadata: &METADATA,
+                            value: &*self.lhs,
+                        }
                     },
-                    FieldInfo {
-                        owner_type_id: TypeId::of::<Self>(),
-                        name: "Rhs",
-                        display_name: "Rhs",
-                        description: "",
-                        type_name: type_name::<Self>(),
-                        value: &*self.rhs,
-                        reflect_value: &*self.rhs,
-                        read_only: false,
-                        immutable_collection: false,
-                        min_value: None,
-                        max_value: None,
-                        step: None,
-                        precision: None,doc: "",
+                    {
+                        static METADATA: FieldMetadata = FieldMetadata {
+                            name: "Rhs",
+                            display_name: "Rhs",
+                            description: "",
+                            tag: "",
+                            read_only: false,
+                            immutable_collection: false,
+                            min_value: None,
+                            max_value: None,
+                            step: None,
+                            precision: None,doc: "",
+                        };
+
+                        FieldRef {
+                            metadata: &METADATA,
+                            value: &*self.rhs,
+                        }
                     },
                 ])
             }
+
+            fn fields_mut(&mut self, func: &mut dyn FnMut(&mut [FieldMut])) {
+                func(&mut [
+                    {
+                        static METADATA: FieldMetadata = FieldMetadata {
+                            name: "Lhs",
+                            display_name: "Lhs",
+                            description: "",
+                            tag: "",
+                            read_only: false,
+                            immutable_collection: false,
+                            min_value: None,
+                            max_value: None,
+                            step: None,
+                            precision: None,
+                            doc: "",
+                        };
+
+                        FieldMut {
+                            metadata: &METADATA,
+                            value: &mut *self.lhs,
+                        }
+                    },
+                    {
+                        static METADATA: FieldMetadata = FieldMetadata {
+                            name: "Rhs",
+                            display_name: "Rhs",
+                            description: "",
+                            tag: "",
+                            read_only: false,
+                            immutable_collection: false,
+                            min_value: None,
+                            max_value: None,
+                            step: None,
+                            precision: None,doc: "",
+                        };
+
+                        FieldMut {
+                            metadata: &METADATA,
+                            value: &mut *self.rhs,
+                        }
+                    },
+                ])
+            }
+
 
             fn into_any(self: Box<Self>) -> Box<dyn Any> {
                 self
@@ -144,34 +205,6 @@ macro_rules! define_two_args_node {
             ) -> Result<Box<dyn Reflect>, Box<dyn Reflect>> {
                 let this = std::mem::replace(self, value.take()?);
                 Ok(Box::new(this))
-            }
-
-            fn fields(&self, func: &mut dyn FnMut(&[&dyn Reflect])) {
-                func(&[&self.lhs, &self.rhs])
-            }
-
-           fn fields_mut(&mut self, func: &mut dyn FnMut(&mut [&mut dyn Reflect])) {
-                func(&mut [&mut self.lhs, &mut self.rhs])
-            }
-
-            fn field(&self, name: &str, func: &mut dyn FnMut(Option<&dyn Reflect>)) {
-                func(match name {
-                    "Lhs" => Some(&self.lhs),
-                    "Rhs" => Some(&self.rhs),
-                    _ => None,
-                })
-            }
-
-            fn field_mut(
-                &mut self,
-                name: &str,
-                func: &mut dyn FnMut(Option<&mut dyn Reflect>),
-            ) {
-                func(match name {
-                    "Lhs" => Some(&mut self.lhs),
-                    "Rhs" => Some(&mut self.rhs),
-                    _ => None,
-                })
             }
         }
     };
@@ -220,6 +253,14 @@ impl<T: EntityId> Reflect for NotNode<T> {
         file!()
     }
 
+    fn derived_types() -> &'static [TypeId] {
+        &[]
+    }
+
+    fn query_derived_types(&self) -> &'static [TypeId] {
+        Self::derived_types()
+    }
+
     fn type_name(&self) -> &'static str {
         type_name::<Self>()
     }
@@ -236,22 +277,49 @@ impl<T: EntityId> Reflect for NotNode<T> {
         env!("CARGO_PKG_NAME")
     }
 
-    fn fields_info(&self, func: &mut dyn FnMut(&[FieldInfo])) {
-        func(&[FieldInfo {
-            owner_type_id: TypeId::of::<Self>(),
-            name: "Lhs",
-            display_name: "Lhs",
-            description: "",
-            type_name: type_name::<Self>(),
-            value: &*self.lhs,
-            reflect_value: &*self.lhs,
-            read_only: false,
-            immutable_collection: false,
-            min_value: None,
-            max_value: None,
-            step: None,
-            precision: None,
-            doc: "",
+    fn fields_ref(&self, func: &mut dyn FnMut(&[FieldRef])) {
+        func(&[{
+            static METADATA: FieldMetadata = FieldMetadata {
+                name: "Lhs",
+                display_name: "Lhs",
+                description: "",
+                tag: "",
+                read_only: false,
+                immutable_collection: false,
+                min_value: None,
+                max_value: None,
+                step: None,
+                precision: None,
+                doc: "",
+            };
+
+            FieldRef {
+                metadata: &METADATA,
+                value: &*self.lhs,
+            }
+        }])
+    }
+
+    fn fields_mut(&mut self, func: &mut dyn FnMut(&mut [FieldMut])) {
+        func(&mut [{
+            static METADATA: FieldMetadata = FieldMetadata {
+                name: "Lhs",
+                display_name: "Lhs",
+                description: "",
+                tag: "",
+                read_only: false,
+                immutable_collection: false,
+                min_value: None,
+                max_value: None,
+                step: None,
+                precision: None,
+                doc: "",
+            };
+
+            FieldMut {
+                metadata: &METADATA,
+                value: &mut *self.lhs,
+            }
         }])
     }
 
@@ -278,28 +346,6 @@ impl<T: EntityId> Reflect for NotNode<T> {
     fn set(&mut self, value: Box<dyn Reflect>) -> Result<Box<dyn Reflect>, Box<dyn Reflect>> {
         let this = std::mem::replace(self, value.take()?);
         Ok(Box::new(this))
-    }
-
-    fn fields(&self, func: &mut dyn FnMut(&[&dyn Reflect])) {
-        func(&[&self.lhs])
-    }
-
-    fn fields_mut(&mut self, func: &mut dyn FnMut(&mut [&mut dyn Reflect])) {
-        func(&mut [&mut self.lhs])
-    }
-
-    fn field(&self, name: &str, func: &mut dyn FnMut(Option<&dyn Reflect>)) {
-        func(match name {
-            "Lhs" => Some(&self.lhs),
-            _ => None,
-        })
-    }
-
-    fn field_mut(&mut self, name: &str, func: &mut dyn FnMut(Option<&mut dyn Reflect>)) {
-        func(match name {
-            "Lhs" => Some(&mut self.lhs),
-            _ => None,
-        })
     }
 }
 
@@ -365,7 +411,7 @@ impl<T: EntityId> LogicNode<T> {
         animations: &AnimationContainer<T>,
     ) -> bool {
         match self {
-            LogicNode::Parameter(rule_name) => parameters.get(rule_name).map_or(false, |p| {
+            LogicNode::Parameter(rule_name) => parameters.get(rule_name).is_some_and(|p| {
                 if let Parameter::Rule(rule_value) = p {
                     *rule_value
                 } else {
@@ -390,7 +436,7 @@ impl<T: EntityId> LogicNode<T> {
             LogicNode::Not(node) => !node.lhs.calculate_value(parameters, animations),
             LogicNode::IsAnimationEnded(animation) => animations
                 .try_get(*animation)
-                .map_or(true, |a| a.has_ended()),
+                .is_none_or(|a| a.has_ended()),
         }
     }
 }

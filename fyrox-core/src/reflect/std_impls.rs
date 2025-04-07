@@ -118,10 +118,10 @@ impl<const N: usize, T: Reflect> ReflectArray for [T; N] {
 
 impl_reflect! {
     #[reflect(ReflectList, ReflectArray)]
-    pub struct Vec<T: Reflect + 'static>;
+    pub struct Vec<T: Reflect>;
 }
 
-impl<T: Reflect + 'static> ReflectArray for Vec<T> {
+impl<T: Reflect> ReflectArray for Vec<T> {
     fn reflect_index(&self, index: usize) -> Option<&dyn Reflect> {
         self.get(index).map(|x| x as &dyn Reflect)
     }
@@ -136,7 +136,7 @@ impl<T: Reflect + 'static> ReflectArray for Vec<T> {
 }
 
 /// REMARK: `Reflect` is implemented for `Vec<T>` where `T: Reflect` only.
-impl<T: Reflect + 'static> ReflectList for Vec<T> {
+impl<T: Reflect> ReflectList for Vec<T> {
     fn reflect_push(&mut self, value: Box<dyn Reflect>) -> Result<(), Box<dyn Reflect>> {
         self.push(*value.downcast::<T>()?);
         Ok(())
@@ -170,8 +170,8 @@ impl<T: Reflect + 'static> ReflectList for Vec<T> {
 
 impl<K, V, S> Reflect for HashMap<K, V, S>
 where
-    K: Reflect + Debug + Eq + Hash + 'static,
-    V: Reflect + Debug + 'static,
+    K: Reflect + Eq + Hash + 'static,
+    V: Reflect,
     S: BuildHasher + 'static,
 {
     blank_reflect!();
@@ -187,8 +187,8 @@ where
 
 impl<K, V, S> ReflectHashMap for HashMap<K, V, S>
 where
-    K: Reflect + Debug + Eq + Hash + 'static,
-    V: Reflect + Debug + 'static,
+    K: Reflect + Eq + Hash + 'static,
+    V: Reflect,
     S: BuildHasher + 'static,
 {
     fn reflect_insert(
@@ -304,6 +304,16 @@ macro_rules! impl_reflect_inner_mutability {
             file!()
         }
 
+        fn derived_types() -> &'static [std::any::TypeId] {
+            // TODO: This seems to be impossible to implement because of `?Sized` trait bound
+            // up above.
+            &[]
+        }
+
+        fn query_derived_types(&self) -> &'static [std::any::TypeId] {
+            T::derived_types()
+        }
+
         fn type_name(&$self) -> &'static str {
             std::any::type_name::<T>()
         }
@@ -320,9 +330,14 @@ macro_rules! impl_reflect_inner_mutability {
             env!("CARGO_PKG_NAME")
         }
 
-        fn fields_info(&$self, func: &mut dyn FnMut(&[FieldInfo])) {
+        fn fields_ref(&$self, func: &mut dyn FnMut(&[FieldRef])) {
             let guard = $acquire_lock_guard;
-            guard.fields_info(func)
+            guard.fields_ref(func)
+        }
+
+        fn fields_mut(&mut $self, func: &mut dyn FnMut(&mut [FieldMut])) {
+            let mut guard = $acquire_lock_guard;
+            guard.fields_mut(func)
         }
 
         fn into_any($self: Box<Self>) -> Box<dyn Any> {
@@ -363,16 +378,6 @@ macro_rules! impl_reflect_inner_mutability {
         ) {
             let mut guard = $acquire_lock_guard;
             guard.set_field(field, value, func)
-        }
-
-        fn fields(&$self, func: &mut dyn FnMut(&[&dyn Reflect])) {
-            let guard = $acquire_lock_guard;
-            guard.fields(func)
-        }
-
-        fn fields_mut(&mut $self, func: &mut dyn FnMut(&mut [&mut dyn Reflect])) {
-            let mut guard = $acquire_lock_guard;
-            guard.fields_mut(func)
         }
 
         fn field(&$self, name: &str, func: &mut dyn FnMut(Option<&dyn Reflect>)) {

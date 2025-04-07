@@ -86,10 +86,11 @@ pub const VERSION: u8 = 2;
 lazy_static! {
     /// Solid white texture
     pub static ref WHITE_1X1: TextureResource = TextureResource::from_bytes(
+        uuid!("09a71013-ccb2-4a41-a48a-ab6c80f14f0e"),
         TextureKind::Rectangle { width: 1, height: 1 },
         TexturePixelKind::R8,
         vec![255],
-        ResourceKind::External("__White_1x1".into()),
+        ResourceKind::External,
     )
     .unwrap();
 }
@@ -261,7 +262,11 @@ uuid_provider!(Layer = "7439d5fd-43a9-45f0-bd7c-76cf4d2ec22e");
 impl Default for Layer {
     fn default() -> Self {
         Self {
-            material: MaterialResource::new_ok(Default::default(), Material::standard_terrain()),
+            material: MaterialResource::new_ok(
+                Uuid::new_v4(),
+                Default::default(),
+                Material::standard_terrain(),
+            ),
             mask_property_name: "maskTexture".to_string(),
             height_map_property_name: "heightMapTexture".to_string(),
             node_uv_offsets_property_name: "nodeUvOffsets".to_string(),
@@ -302,7 +307,7 @@ fn make_height_map_texture_internal(
     data.set_t_wrap_mode(TextureWrapMode::ClampToEdge);
     data.set_s_wrap_mode(TextureWrapMode::ClampToEdge);
 
-    Some(Resource::new_ok(Default::default(), data))
+    Some(Resource::new_ok(Uuid::new_v4(), Default::default(), data))
 }
 
 fn make_blank_hole_texture(size: Vector2<u32>) -> TextureResource {
@@ -323,7 +328,7 @@ fn make_hole_texture(mask_data: Vec<u8>, size: Vector2<u32>) -> TextureResource 
     data.set_s_wrap_mode(TextureWrapMode::ClampToEdge);
     data.set_magnification_filter(TextureMagnificationFilter::Nearest);
     data.set_minification_filter(TextureMinificationFilter::Nearest);
-    Resource::new_ok(Default::default(), data)
+    Resource::new_ok(Uuid::new_v4(), Default::default(), data)
 }
 
 /// Create an Ok texture resource of the given size from the given height values.
@@ -901,7 +906,7 @@ impl BrushContext {
     /// texture-space coordinates. This should be the same terrain as was given to [BrushContext::start_stroke].
     /// - `position`: The position of the brush in world coordinates.
     pub fn stamp(&mut self, terrain: &Terrain, position: Vector3<f32>) {
-        let value = if matches!(self.stroke.brush().mode, BrushMode::Flatten { .. }) {
+        let value = if matches!(self.stroke.brush().mode, BrushMode::Flatten) {
             self.interpolate_value(terrain, position)
         } else {
             0.0
@@ -916,7 +921,7 @@ impl BrushContext {
     /// - `start`: The start of the brush in world coordinates.
     /// - `end`: The end of the brush in world coordinates.
     pub fn smear(&mut self, terrain: &Terrain, start: Vector3<f32>, end: Vector3<f32>) {
-        let value = if matches!(self.stroke.brush().mode, BrushMode::Flatten { .. }) {
+        let value = if matches!(self.stroke.brush().mode, BrushMode::Flatten) {
             self.interpolate_value(terrain, start)
         } else {
             0.0
@@ -1038,6 +1043,7 @@ impl BrushContext {
 /// overlap with their neighbors just as chunks overlap. Two adjacent blocks share vertices along their edge,
 /// so they also share pixels in the height map data.
 #[derive(Debug, Reflect, Clone, ComponentProvider)]
+#[reflect(derived_type = "Node")]
 pub struct Terrain {
     base: Base,
 
@@ -1160,7 +1166,11 @@ struct OldLayer {
 impl Default for OldLayer {
     fn default() -> Self {
         Self {
-            material: MaterialResource::new_ok(Default::default(), Material::standard_terrain()),
+            material: MaterialResource::new_ok(
+                Uuid::new_v4(),
+                Default::default(),
+                Material::standard_terrain(),
+            ),
             mask_property_name: "maskTexture".to_string(),
             chunk_masks: Default::default(),
         }
@@ -1240,7 +1250,11 @@ impl Visit for Terrain {
                     }*/
 
                     self.layers.push(Layer {
-                        material: MaterialResource::new_ok(Default::default(), new_material),
+                        material: MaterialResource::new_ok(
+                            Uuid::new_v4(),
+                            Default::default(),
+                            new_material,
+                        ),
                         mask_property_name: layer.mask_property_name,
                         ..Default::default()
                     });
@@ -1351,6 +1365,7 @@ fn resize_u8(data: Vec<u8>, data_size: Vector2<u32>, new_size: Vector2<u32>) -> 
     resampled_image.into_raw()
 }
 
+#[allow(clippy::manual_slice_fill)] // False-positive
 fn resize_f32(mut data: Vec<f32>, data_size: Vector2<u32>, new_size: Vector2<u32>) -> Vec<f32> {
     let max = data.iter().copied().reduce(f32::max).unwrap();
     let min = data.iter().copied().reduce(f32::min).unwrap();
@@ -1359,7 +1374,7 @@ fn resize_f32(mut data: Vec<f32>, data_size: Vector2<u32>, new_size: Vector2<u32
     if range == 0.0 {
         let size: usize = (new_size.x * new_size.y) as usize;
         data.clear();
-        data.extend(std::iter::repeat(min).take(size));
+        data.extend(std::iter::repeat_n(min, size));
         return data;
     }
 
@@ -1391,7 +1406,7 @@ fn create_zero_margin(mut data: Vec<f32>, data_size: Vector2<u32>) -> Vec<f32> {
     let h0 = data_size.y as usize;
     let h1 = h0 + 2;
     let new_area = w1 * h1;
-    data.extend(std::iter::repeat(0.0).take(new_area - data.len()));
+    data.extend(std::iter::repeat_n(0.0, new_area - data.len()));
     for y in (0..h0).rev() {
         let i0 = y * w0;
         let i1 = (y + 1) * w1;
@@ -2290,6 +2305,7 @@ impl Terrain {
                 let data = mask.data_ref();
                 let new_mask = resize_u8(data.data().to_vec(), *self.mask_size, new_size);
                 let new_mask_texture = TextureResource::from_bytes(
+                    Uuid::new_v4(),
                     TextureKind::Rectangle {
                         width: new_size.x,
                         height: new_size.y,
@@ -2512,7 +2528,7 @@ fn validate_block_size(x: u32, size: Vector2<u32>) -> Result<(), String> {
 fn create_terrain_layer_material() -> MaterialResource {
     let mut material = Material::standard_terrain();
     material.set_property("texCoordScale", Vector2::new(10.0, 10.0));
-    MaterialResource::new_ok(Default::default(), material)
+    MaterialResource::new_ok(Uuid::new_v4(), Default::default(), material)
 }
 
 impl ConstructorProvider<Node, Graph> for Terrain {
@@ -2586,7 +2602,7 @@ impl NodeTrait for Terrain {
             || (self.frustum_culling()
                 && !ctx
                     .frustum
-                    .map_or(true, |f| f.is_intersects_aabb(&self.world_bounding_box())))
+                    .is_none_or(|f| f.is_intersects_aabb(&self.world_bounding_box())))
         {
             return RdcControlFlow::Continue;
         }
@@ -2657,7 +2673,11 @@ impl NodeTrait for Terrain {
                         MaterialProperty::Vector4(Vector4::new(kx, kz, kw, kh)),
                     );
 
-                    let material = MaterialResource::new_ok(Default::default(), material.clone());
+                    let material = MaterialResource::new_ok(
+                        Uuid::new_v4(),
+                        Default::default(),
+                        material.clone(),
+                    );
 
                     let node_transform = chunk_transform
                         * Matrix4::new_translation(&Vector3::new(
@@ -2761,6 +2781,7 @@ pub struct TerrainBuilder {
 
 fn create_layer_mask(width: u32, height: u32, value: u8) -> TextureResource {
     let mask = TextureResource::from_bytes(
+        Uuid::new_v4(),
         TextureKind::Rectangle { width, height },
         TexturePixelKind::R8,
         vec![value; (width * height) as usize],

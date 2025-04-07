@@ -62,6 +62,7 @@ use crate::{
     },
     load_image,
 };
+use fyrox::renderer::framework::framebuffer::ReadTarget;
 use image::{ColorType, GenericImage, Rgba};
 
 #[derive(Default)]
@@ -112,7 +113,7 @@ pub trait AssetPreviewGenerator: Send + Sync + 'static {
 
     /// Generates a preview image for an asset. For example, in case of prefabs, it will be the
     /// entire prefab content rendered to an image. In case of sounds it will be its waveform, and
-    /// so on.  
+    /// so on.
     fn generate_preview(
         &mut self,
         resource: &UntypedResource,
@@ -146,11 +147,10 @@ impl AssetPreviewGenerator for TexturePreview {
 
             let mut material = Material::standard_two_sides();
             material.bind("diffuseTexture", texture);
-            let material = MaterialResource::new_ok(Default::default(), material);
+            let material = MaterialResource::new_embedded(material);
 
             MeshBuilder::new(BaseBuilder::new())
-                .with_surfaces(vec![SurfaceBuilder::new(SurfaceResource::new_ok(
-                    ResourceKind::Embedded,
+                .with_surfaces(vec![SurfaceBuilder::new(SurfaceResource::new_embedded(
                     SurfaceData::make_quad(
                         &(UnitQuaternion::from_axis_angle(
                             &Vector3::z_axis(),
@@ -263,6 +263,7 @@ impl AssetPreviewGenerator for SoundPreview {
                 }
 
                 return TextureResource::from_bytes(
+                    Uuid::new_v4(),
                     TextureKind::Rectangle {
                         width: width as u32,
                         height: height as u32,
@@ -294,6 +295,7 @@ fn render_scene_to_texture(
     scene: &mut Scene,
     rt_size: Vector2<f32>,
 ) -> Option<AssetPreviewTexture> {
+    let elapsed_time = engine.elapsed_time();
     let GraphicsContext::Initialized(ref mut graphics_context) = engine.graphics_context else {
         Log::warn("Cannot render an asset preview when the renderer is not initialized!");
         return None;
@@ -332,24 +334,21 @@ fn render_scene_to_texture(
     scene.update(rt_size, 0.016, Default::default());
 
     let temp_handle = Handle::new(u32::MAX, u32::MAX);
-    if let Some(ldr_texture) = graphics_context
-        .renderer
-        .render_scene(temp_handle, scene, 0.0)
-        .ok()
-        .and_then(|data| {
-            data.ldr_scene_framebuffer
-                .color_attachments()
-                .first()
-                .map(|a| a.texture.clone())
-        })
+    if let Ok(scene_data) =
+        graphics_context
+            .renderer
+            .render_scene(temp_handle, scene, elapsed_time, 0.0)
     {
-        let ldr_texture = ldr_texture.borrow_mut();
+        let ldr_texture = scene_data.ldr_scene_frame_texture();
+
         let (width, height) = match ldr_texture.kind() {
             GpuTextureKind::Rectangle { width, height } => (width, height),
             _ => unreachable!(),
         };
 
-        let pixels = ldr_texture.read_pixels();
+        let pixels = scene_data
+            .ldr_scene_framebuffer
+            .read_pixels(ReadTarget::Color(0))?;
 
         // TODO: This is a hack, refactor `render_scene` method to accept render data from
         // outside, instead of messing around with these temporary handles.
@@ -359,6 +358,7 @@ fn render_scene_to_texture(
             .remove(&temp_handle);
 
         TextureResource::from_bytes(
+            Uuid::new_v4(),
             TextureKind::Rectangle {
                 width: width as u32,
                 height: height as u32,
@@ -465,12 +465,10 @@ impl AssetPreviewGenerator for ShaderPreview {
         scene: &mut Scene,
     ) -> Handle<Node> {
         if let Some(shader) = resource.try_cast::<Shader>() {
-            let material =
-                MaterialResource::new_ok(Default::default(), Material::from_shader(shader));
+            let material = MaterialResource::new_embedded(Material::from_shader(shader));
 
             MeshBuilder::new(BaseBuilder::new())
-                .with_surfaces(vec![SurfaceBuilder::new(SurfaceResource::new_ok(
-                    ResourceKind::Embedded,
+                .with_surfaces(vec![SurfaceBuilder::new(SurfaceResource::new_embedded(
                     SurfaceData::make_sphere(32, 32, 1.0, &Matrix4::identity()),
                 ))
                 .with_material(material)
@@ -510,8 +508,7 @@ impl AssetPreviewGenerator for MaterialPreview {
     ) -> Handle<Node> {
         if let Some(material) = resource.try_cast::<Material>() {
             MeshBuilder::new(BaseBuilder::new())
-                .with_surfaces(vec![SurfaceBuilder::new(SurfaceResource::new_ok(
-                    ResourceKind::Embedded,
+                .with_surfaces(vec![SurfaceBuilder::new(SurfaceResource::new_embedded(
                     SurfaceData::make_sphere(32, 32, 1.0, &Matrix4::identity()),
                 ))
                 .with_material(material)

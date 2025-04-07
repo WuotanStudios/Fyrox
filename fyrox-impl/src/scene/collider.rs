@@ -48,6 +48,7 @@ use crate::{
 };
 use fyrox_core::algebra::{Isometry3, Translation3};
 use fyrox_core::uuid_provider;
+
 use fyrox_graph::constructor::ConstructorProvider;
 use fyrox_graph::{BaseSceneGraph, SceneGraphNode};
 use rapier3d::geometry::{self, ColliderHandle};
@@ -549,6 +550,7 @@ impl ColliderShape {
 /// Collider is a geometric entity that can be attached to a rigid body to allow participate it
 /// participate in contact generation, collision response and proximity queries.
 #[derive(Reflect, Visit, Debug, ComponentProvider)]
+#[reflect(derived_type = "Node")]
 pub struct Collider {
     base: Base,
 

@@ -41,7 +41,9 @@ pub use sstorage::ImmutableString;
 pub use uuid;
 
 use crate::visitor::{Visit, VisitResult, Visitor};
+use bytemuck::Pod;
 use fxhash::FxHashMap;
+use std::collections::hash_map::Entry;
 use std::ffi::OsString;
 use std::hash::Hasher;
 use std::{
@@ -50,8 +52,6 @@ use std::{
     hash::Hash,
     path::{Path, PathBuf},
 };
-
-use bytemuck::Pod;
 pub mod color;
 pub mod color_gradient;
 pub mod early;
@@ -304,16 +304,42 @@ pub fn hash_combine(lhs: u64, rhs: u64) -> u64 {
 
 /// Strip working directory from file name. The function may fail for one main reason -
 /// input path is not valid, does not exist, or there is some other issues with it.
+/// The last component of the path is permitted to not exist, so long as the rest of the path exists.
 pub fn make_relative_path<P: AsRef<Path>>(path: P) -> Result<PathBuf, std::io::Error> {
-    match path
-        .as_ref()
-        .canonicalize()?
-        .strip_prefix(std::env::current_dir()?.canonicalize()?)
-    {
+    let path = path.as_ref();
+    // Canonicalization requires the full path to exist, so remove the file name before
+    // calling canonicalize.
+    let file_name = path.file_name().ok_or(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("Invalid path: {}", path.display()),
+    ))?;
+    let dir = path.parent();
+    let dir = if let Some(dir) = dir {
+        if dir.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            dir
+        }
+    } else {
+        Path::new(".")
+    };
+    let canon_path = dir
+        .canonicalize()
+        .map_err(|err| {
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Unable to canonicalize '{}'. Reason: {err}", dir.display()),
+            )
+        })?
+        .join(file_name);
+    match canon_path.strip_prefix(std::env::current_dir()?.canonicalize()?) {
         Ok(relative_path) => Ok(replace_slashes(relative_path)),
-        Err(_) => Err(std::io::Error::new(
+        Err(err) => Err(std::io::Error::new(
             std::io::ErrorKind::Other,
-            "unable to strip prefix!",
+            format!(
+                "unable to strip prefix from '{}'! Reason: {err}",
+                canon_path.display()
+            ),
         )),
     }
 }
@@ -470,6 +496,83 @@ where
     S: AsRef<str>,
 {
     iter.find(|(_, value)| value.name() == name.as_ref())
+}
+
+/// Swaps the content of a hash map entry with the content of an `Option`.
+pub fn swap_hash_map_entry<K, V>(entry: Entry<K, V>, value: &mut Option<V>) {
+    match (entry, value) {
+        (Entry::Occupied(entry), p @ None) => *p = Some(entry.remove()),
+        (Entry::Occupied(mut entry), Some(p)) => std::mem::swap(entry.get_mut(), p),
+        (Entry::Vacant(_), None) => (),
+        (Entry::Vacant(entry), p @ Some(_)) => drop(entry.insert(p.take().unwrap())),
+    }
+}
+
+/// Swaps the content of two hash map entries.
+pub fn swap_hash_map_entries<K0, K1, V>(entry0: Entry<K0, V>, entry1: Entry<K1, V>) {
+    match (entry0, entry1) {
+        (Entry::Occupied(e0), Entry::Vacant(e1)) => drop(e1.insert(e0.remove())),
+        (Entry::Occupied(mut e0), Entry::Occupied(mut e1)) => {
+            std::mem::swap(e0.get_mut(), e1.get_mut())
+        }
+        (Entry::Vacant(_), Entry::Vacant(_)) => (),
+        (Entry::Vacant(e0), Entry::Occupied(e1)) => drop(e0.insert(e1.remove())),
+    }
+}
+
+#[macro_export]
+macro_rules! define_as_any_trait {
+    ($trait_name:ident => $derived_trait:ident) => {
+        /// A base trait that provides useful methods for trait downcasting.
+        pub trait $trait_name: std::any::Any {
+            /// Casts `self` as `&dyn Any`.
+            fn as_any(&self) -> &dyn std::any::Any;
+
+            /// Casts `self` as `&mut dyn Any`.
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+
+            /// Casts `Box<Self>` as `Box<dyn Any>`.
+            fn into_any(self: Box<Self>) -> Box<dyn std::any::Any>;
+        }
+
+        impl<T: $derived_trait> $trait_name for T {
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+                self
+            }
+
+            fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+                self
+            }
+        }
+    };
+    ($trait_name:ident: $($sub_trait:ident),* => $derived_trait:ident) => {
+        /// A base trait that provides useful methods for trait downcasting.
+        pub trait $trait_name: std::any::Any + $($sub_trait),* {
+            fn as_any(&self) -> &dyn std::any::Any;
+
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+
+            fn into_any(self: Box<Self>) -> Box<dyn std::any::Any>;
+        }
+
+        impl<T: $derived_trait> $trait_name for T {
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+                self
+            }
+
+            fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
+                self
+            }
+        }
+    };
 }
 
 #[cfg(test)]
@@ -644,8 +747,9 @@ mod test {
 
     #[test]
     fn test_make_relative_path() {
-        assert!(make_relative_path(Path::new("foo.txt")).is_err());
-        assert!(make_relative_path(Path::new("Cargo.toml")).is_ok());
+        assert!(make_relative_path(Path::new("fake_dir").join(Path::new("foo.txt"))).is_err());
+        make_relative_path(Path::new("Cargo.toml")).unwrap();
+        make_relative_path(Path::new("Cargo.toml").canonicalize().unwrap()).unwrap();
     }
 
     #[test]

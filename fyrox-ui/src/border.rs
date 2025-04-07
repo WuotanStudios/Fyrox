@@ -102,6 +102,7 @@ use std::ops::{Deref, DerefMut};
 /// ```
 #[derive(Default, Clone, Visit, Reflect, Debug, TypeUuidProvider, ComponentProvider)]
 #[type_uuid(id = "6aba3dc5-831d-481a-bc83-ec10b2b2bf12")]
+#[reflect(derived_type = "UiNode")]
 pub struct Border {
     /// Base widget of the border. See [`Widget`] docs for more info.
     pub widget: Widget,
